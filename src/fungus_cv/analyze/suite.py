@@ -13,7 +13,6 @@ import hashlib
 import json
 import logging
 import math
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Literal
@@ -21,7 +20,7 @@ from typing import Annotated, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from fungus_cv import __version__
+from fungus_cv.provenance import software_provenance
 from fungus_cv.storage import iso_utc, utc_now
 
 log = logging.getLogger(__name__)
@@ -357,27 +356,10 @@ def run_suite(suite_path: Path, out_root: Path | None = None, evaluate_model=Non
 
     suite_result = SuiteResult(
         suite=suite.name, started_utc=iso_utc(started), checks=results, out_dir=out_dir,
-        baseline_found=bool(baseline), provenance=_provenance(),
+        baseline_found=bool(baseline), provenance=software_provenance(),
     )
     write_results(suite_result)
     return suite_result
-
-
-def _provenance() -> dict:
-    info = {"fungus_cv_version": __version__}
-    try:
-        commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).parent, capture_output=True,
-            text=True, timeout=5)
-        dirty = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"], cwd=Path(__file__).parent,
-            capture_output=True, text=True, timeout=5)
-        if commit.returncode == 0:
-            info["git_commit"] = commit.stdout.strip()
-            info["git_dirty"] = bool(dirty.stdout.strip())
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return info
 
 
 def _num(value: float | None):

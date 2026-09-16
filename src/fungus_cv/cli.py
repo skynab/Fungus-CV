@@ -553,20 +553,37 @@ def report(
     exclude_jumps: bool = typer.Option(False, help="Leave frames that jump off the local "
                                        "trend out of the fits (they are always marked)."),
     plot: list[str] = typer.Option([], help="Plot(s) to report (repeatable). Default: all."),
+    model: list[str] = typer.Option([], help="Model(s) to fit (repeatable): linear, sqrt, "
+                                    "sqrt_lag, power, logistic, gompertz, richards. Default: "
+                                    "linear, sqrt, power, logistic."),
+    bootstrap: int = typer.Option(1000, help="Block-bootstrap refits for 95% intervals "
+                                  "(0 = off)."),
+    errors: str = typer.Option("auto", help="Frame errors: auto (choose by AICc) | iid "
+                               "(independent) | ar1 (correlated between neighbouring frames)."),
 ) -> None:
     """Fit growth models and write plots to results/report/ (one folder per field plot)."""
+    from fungus_cv.analyze.fit import DEFAULT_MODELS, MODELS, best_fit, format_params
     from fungus_cv.analyze.report import DEFAULT_EXCLUDE, list_plots, make_report
 
     exp = _load_experiment(experiment)
     _setup_logging()
     if t0 is not None and t0.tzinfo is None:
         t0 = t0.astimezone()
+    if errors not in ("auto", "iid", "ar1"):
+        typer.secho("--errors must be auto, iid or ar1", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    unknown = [m for m in model if m not in MODELS]
+    if unknown:
+        typer.secho(f"unknown model(s) {unknown}; choose from {list(MODELS)}",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
     try:
         plots = list(plot) or list_plots(exp)
         results = [make_report(
             exp, metric=metric, t0=t0, time_unit=time_unit,
             exclude_flags=() if include_flagged else DEFAULT_EXCLUDE, video=video,
-            exclude_jumps=exclude_jumps, plot=name,
+            exclude_jumps=exclude_jumps, plot=name, models=tuple(model) or DEFAULT_MODELS,
+            bootstrap=bootstrap, errors=errors,
         ) for name in plots]
     except (FileNotFoundError, ValueError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
@@ -578,16 +595,22 @@ def report(
                    f"{result.n_excluded} excluded, {result.retreats} retreat(s) and "
                    f"{result.jumps} jump(s) to check (see frame_flags.csv); "
                    f"time in {result.time_unit}")
-        ok = [f for f in result.fits if f.ok]
-        best_aic = min((f.aic for f in ok), default=None)
+        best_model = best_fit(result.fits)
+        if result.fits and result.fits[0].bootstrap:
+            b = result.fits[0].bootstrap
+            typer.echo(f"  parameters: estimate ± SE [95% bootstrap interval, {b['n']} refits]")
         for fit in result.fits:
             if not fit.ok:
                 typer.echo(f"  {fit.model:9s} failed: {fit.message}")
                 continue
-            params = ", ".join(f"{k}={v:.4g}±{fit.stderr[k]:.2g}"
-                               for k, v in fit.params.items())
-            best = "  <- lowest AIC" if fit.aic == best_aic else ""
-            typer.echo(f"  {fit.model:9s} {params}  R²={fit.r2:.4f}  AIC={fit.aic:.1f}{best}")
+            best = "  <- best (lowest AICc)" if fit is best_model else ""
+            chi2 = f"  χ²/dof={fit.reduced_chi2:.2f}" if fit.weighted else ""
+            chi2 += f"  AR(1) φ={fit.ar1_phi:.2f}" if fit.error_model == "ar1" else ""
+            typer.echo(f"  {fit.model:9s} {format_params(fit)}")
+            typer.echo(f"  {'':9s} R²={fit.r2:.4f}  AICc={fit.aicc:.1f}  "
+                       f"weight={fit.akaike_weight:.2f}{chi2}  DW={fit.durbin_watson:.2f}{best}")
+            for warning in fit.warnings:
+                typer.echo(f"  {'':9s} warning: {warning}")
         for f in result.files:
             typer.echo(f"wrote {f}")
 
@@ -747,6 +770,69 @@ def validate_cmd(
                    f"{', '.join(a.unmatched[:5])}")
     for f in a.files:
         typer.echo(f"wrote {f}")
+
+
+@app.command()
+def study(
+    study_file: Path = typer.Argument(..., help="Study YAML: experiments with their condition "
+                                      "and replicate, the metric and the model."),
+    init: bool = typer.Option(False, "--init", help="Write an example study file and exit."),
+    out: Path | None = typer.Option(None, help="Output folder. Default: <study>_results next "
+                                    "to the study file."),
+) -> None:
+    """Fit every replicate, summarise conditions and compare them (Welch t, Holm-adjusted)."""
+    from fungus_cv.analyze import study as study_mod
+    from fungus_cv.analyze.fit import format_params
+
+    if init:
+        try:
+            study_mod.write_template(study_file)
+        except FileExistsError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(1) from exc
+        typer.echo(f"Wrote {study_file}. List your experiments and conditions, then run this "
+                   "command without --init.")
+        return
+    _setup_logging()
+    try:
+        result = study_mod.run_study(study_file, out)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+
+    s = result.study
+    typer.echo(f"{s.name}: {result.metric} with {s.model}, time in {result.time_unit}")
+    typer.echo("replicates:")
+    for r in result.replicates:
+        if r.fit is None:
+            typer.echo(f"  {r.condition}/{r.replicate}: not used ({r.error or 'fit failed'})")
+            continue
+        typer.echo(f"  {r.condition}/{r.replicate}: {format_params(r.fit)}  "
+                   f"R²={r.fit.r2:.3f}  n={r.fit.n}")
+    for param in s.compared_params:
+        typer.echo(f"{param}:")
+        for row in (x for x in result.conditions if x["param"] == param):
+            if row["n"] >= 2:
+                typer.echo(f"  {row['condition']:14s} {row['mean']:.4g} ± {row['sd']:.2g} SD "
+                           f"(95% CI {row['ci_low']:.4g} to {row['ci_high']:.4g}, "
+                           f"n={row['n']})")
+            else:
+                typer.echo(f"  {row['condition']:14s} {row['mean']:.4g} (n={row['n']})")
+        for row in (x for x in result.comparisons if x["param"] == param):
+            if math.isnan(row["p"]):
+                typer.echo(f"  {row['condition']} − {row['versus']}: {row['diff']:+.4g} "
+                           "(need 2+ replicates in each for a test)")
+                continue
+            typer.echo(f"  {row['condition']} − {row['versus']}: {row['diff']:+.4g} "
+                       f"(95% CI {row['ci_low']:+.4g} to {row['ci_high']:+.4g}), "
+                       f"p={row['p']:.3g}, Holm p={row['p_holm']:.3g}, g={row['hedges_g']:.2f}")
+    totals = [r for r in result.model_selection if r["condition"] == "(all)"]
+    if len(totals) > 1:
+        typer.echo("model selection over " + totals[0]["replicate"] + ": " + ", ".join(
+            f"{r['model']} {r['akaike_weight']:.2f}" for r in totals))
+    for w in result.warnings:
+        typer.secho(f"warning: {w}", fg=typer.colors.YELLOW)
+    typer.echo(f"wrote {result.out_dir} (methods.md has a draft methods paragraph)")
 
 
 @app.command("validate-suite")

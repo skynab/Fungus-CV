@@ -75,7 +75,8 @@ class ReportPage(QWidget):
         self.message.setWordWrap(True)
 
         self.fits = QTableWidget(0, 5)
-        self.fits.setHorizontalHeaderLabels(["Model", "Parameters (± SE)", "R²", "AIC", ""])
+        self.fits.setHorizontalHeaderLabels(["Model", "Parameters (± SE) [95% CI]", "R²", "AICc",
+                                             "Weight"])
         header = self.fits.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
@@ -92,7 +93,7 @@ class ReportPage(QWidget):
         left = QVBoxLayout()
         left.addWidget(options)
         left.addWidget(self.message)
-        left.addWidget(QLabel("Model fits (lowest AIC fits best)"))
+        left.addWidget(QLabel("Model fits (weight = share of evidence; highest fits best)"))
         left.addWidget(self.fits, 1)
         left_widget = QWidget()
         left_widget.setLayout(left)
@@ -159,15 +160,18 @@ class ReportPage(QWidget):
         self.message.setText(f"{result.n_used} frames used, {result.n_excluded} excluded, "
                              f"{result.retreats} retreat(s), {result.jumps} jump(s) — see "
                              "frame_flags.csv. Time in " + result.time_unit + ".")
-        ok = [f for f in result.fits if f.ok]
-        best = min((f.aic for f in ok), default=None)
+        from fungus_cv.analyze.fit import best_fit, format_params
+
+        best = best_fit(result.fits)
         self.fits.setRowCount(len(result.fits))
         for i, fit in enumerate(result.fits):
-            params = "failed: " + fit.message if not fit.ok else ", ".join(
-                f"{k}={v:.4g}±{fit.stderr[k]:.2g}" for k, v in fit.params.items())
+            params = "failed: " + fit.message if not fit.ok else format_params(fit)
+            if fit.warnings:
+                params += "\n⚠ " + "\n⚠ ".join(fit.warnings)
             cells = [fit.model, params, f"{fit.r2:.4f}" if fit.ok else "",
-                     f"{fit.aic:.1f}" if fit.ok else "",
-                     "best" if fit.ok and fit.aic == best else ""]
+                     f"{fit.aicc:.1f}" if fit.ok else "",
+                     f"{fit.akaike_weight:.2f}" + (" best" if fit is best else "")
+                     if fit.ok else ""]
             for j, text in enumerate(cells):
                 self.fits.setItem(i, j, QTableWidgetItem(text))
         self.fits.resizeRowsToContents()

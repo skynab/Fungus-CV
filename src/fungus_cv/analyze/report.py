@@ -13,7 +13,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from fungus_cv.analyze.fit import FitResult, fit_all
+from fungus_cv.analyze.fit import DEFAULT_MODELS, FitResult, fit_all
 from fungus_cv.analyze.pipeline import MEASUREMENTS_NAME, RESULTS_DIR
 from fungus_cv.storage import Experiment, iso_utc, parse_iso_utc
 
@@ -174,23 +174,46 @@ def detect_jumps(t: np.ndarray, y: np.ndarray, unc: np.ndarray, window: int = 3,
     return jumps
 
 
-def make_report(
+@dataclass
+class Series:
+    """One metric over time for one plot, with the frames that go into fits marked."""
+
+    metric: str
+    plot: str
+    rows: list[dict]
+    time_unit: str
+    t0_ts: float
+    t: np.ndarray  # in time_unit since t0
+    y: np.ndarray
+    unc: np.ndarray  # standard uncertainty per frame (NaN if the metric has none)
+    excluded: np.ndarray
+    jump: np.ndarray
+    retreat: np.ndarray
+
+    @property
+    def use(self) -> np.ndarray:
+        return ~self.excluded
+
+    @property
+    def span_seconds(self) -> float:
+        return float(self.t[-1] - self.t[0]) * TIME_UNITS[self.time_unit] if len(self.t) else 0.0
+
+    @property
+    def sigma(self) -> np.ndarray | None:
+        """Uncertainties of the used frames, if every one is known and positive."""
+        u = self.unc[self.use]
+        return u if len(u) and np.all(np.isfinite(u)) and np.all(u > 0) else None
+
+
+def load_series(
     experiment: Experiment,
     metric: str | None = None,
+    plot: str | None = None,
     t0: datetime | None = None,
     time_unit: str = "auto",
     exclude_flags: tuple[str, ...] = DEFAULT_EXCLUDE,
-    models: tuple[str, ...] = ("linear", "sqrt", "power", "logistic"),
-    video: bool = False,
-    fps: int = 10,
     exclude_jumps: bool = False,
-    plot: str | None = None,
-) -> ReportResult:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+) -> Series:
     plots = list_plots(experiment)
     if plot is None:
         if len(plots) > 1:
@@ -208,6 +231,8 @@ def make_report(
         add_edge_advance(experiment, rows, plot, exclude_flags)
     if metric not in rows[0]:
         raise ValueError(f"unknown metric {metric!r}; columns: {list(rows[0])}")
+    if time_unit != "auto" and time_unit not in TIME_UNITS:
+        raise ValueError(f"unknown time unit {time_unit!r}; use one of {list(TIME_UNITS)}")
 
     times = np.array([parse_iso_utc(r["timestamp_utc"]).timestamp() for r in rows])
     t0_ts = t0.timestamp() if t0 else times[0]
@@ -225,10 +250,38 @@ def make_report(
     if exclude_jumps:
         excluded = excluded | jump
     retreat = count_retreats(np.where(excluded, np.nan, y), unc) & ~excluded
-    use = ~excluded
+    return Series(metric, plot, rows, time_unit, t0_ts, t, y, unc, excluded, jump, retreat)
 
-    sigma = unc[use] if np.all(np.isfinite(unc[use])) and np.all(unc[use] > 0) else None
-    fits = fit_all(t[use], y[use], models=models, sigma=sigma)
+
+def make_report(
+    experiment: Experiment,
+    metric: str | None = None,
+    t0: datetime | None = None,
+    time_unit: str = "auto",
+    exclude_flags: tuple[str, ...] = DEFAULT_EXCLUDE,
+    models: tuple[str, ...] = DEFAULT_MODELS,
+    video: bool = False,
+    fps: int = 10,
+    exclude_jumps: bool = False,
+    plot: str | None = None,
+    bootstrap: int = 1000,
+    errors: str = "auto",
+    seed: int = 0,
+) -> ReportResult:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plots = list_plots(experiment)
+    series = load_series(experiment, metric, plot, t0, time_unit, exclude_flags, exclude_jumps)
+    metric, plot, rows, time_unit = series.metric, series.plot, series.rows, series.time_unit
+    t, y, unc = series.t, series.y, series.unc
+    excluded, jump, retreat, use = series.excluded, series.jump, series.retreat, series.use
+    t0_ts = series.t0_ts
+    sigma = series.sigma
+    fits = fit_all(t[use], y[use], models=models, sigma=sigma, bootstrap=bootstrap,
+                   errors=errors, seed=seed)
 
     out_dir = experiment.root / RESULTS_DIR / "report"
     if plots != ["main"]:
@@ -293,7 +346,7 @@ def make_report(
                 # Later models are dashed and drawn on top, so identical fits stay visible.
                 ax.plot(grid, fit.predict(grid), color=color, lw=2,
                         ls=(0, (6, 3)) if i % 2 else "-", zorder=2.5 if i % 2 else 2,
-                        label=f"{fit.model}  R² {fit.r2:.4f}")
+                        label=f"{fit.model}  R² {fit.r2:.4f}  w {fit.akaike_weight:.2f}")
     ax.set_xlabel(f"Time since start ({time_unit})", color=INK)
     ax.set_ylabel(label, color=INK)
     where = experiment.config.name + ("" if plot == "main" else f" / {plot}")
@@ -331,6 +384,7 @@ def make_report(
         "excluded_flags": list(exclude_flags), "retreats": result.retreats,
         "jumps": result.jumps, "jumps_excluded": exclude_jumps,
         "weighted_by_uncertainty": sigma is not None,
+        "model_selection": "AICc; akaike_weight = relative likelihood among the fitted models",
         "fits": [f.to_dict() for f in fits],
     }
     fits_json = out_dir / "fits.json"

@@ -334,7 +334,9 @@ def annotate(experiment: Path = typer.Argument(..., help="Experiment folder.")) 
         raise typer.Exit(1) from None
     path = annotations_path(exp)
     ann.save(path)
-    typer.echo(f"Saved {path} (axis length {ann.axis_length_px:.1f} px)")
+    kind = f"path through {len(ann.path)} points" if ann.path else "straight axis"
+    typer.echo(f"Saved {path} ({kind}, {ann.polyline().length:.1f} px"
+               f"{', with neutral patch' if ann.reference_patch else ''})")
 
 
 @app.command("pick-color")
@@ -485,6 +487,8 @@ def prompt(
         "Pick one where the target is clearly visible."
     ),
     preview: bool = typer.Option(True, help="Show the SAM mask live while clicking."),
+    reference: bool = typer.Option(False, "--reference",
+                                   help="Prompt the reference object (e.g. stem) instead."),
 ) -> None:
     """Click on the target for SAM 2 (left = target, right = not target)."""
     from fungus_cv.analyze.pipeline import AnalysisError, Analyzer
@@ -503,7 +507,8 @@ def prompt(
     frame_file = analyzer.frames[index]["file"]
     image = analyzer.aligned_frame(index)
 
-    cfg = exp.config.analysis.target.sam2
+    block = exp.config.analysis.reference if reference else exp.config.analysis.target
+    cfg = block.sam2
     path = exp.root / cfg.prompts_file
     prompts = Prompts.load(path) if path.exists() else Prompts()
     preview_fn = None
@@ -523,8 +528,9 @@ def prompt(
     prompts.set(result)
     prompts.save(path)
     typer.echo(f"Saved prompt for {frame_file} to {path} ({len(prompts.frames)} prompted frame(s))")
-    if exp.config.analysis.target.method != "sam2":
-        typer.echo("Note: set analysis.target.method: sam2 in config.yaml to use these prompts.")
+    if block.method != "sam2":
+        which = "reference" if reference else "target"
+        typer.echo(f"Note: set analysis.{which}.method: sam2 in config.yaml to use these prompts.")
 
 
 @app.command()
@@ -571,6 +577,47 @@ def compare(
     typer.echo(f"  extent difference (b - a): mean {r.extent_diff_mean:+.3f} "
                f"sd {r.extent_diff_sd:.3f} {r.extent_unit}")
     typer.echo(f"wrote {r.csv_path}")
+
+
+@app.command("validate")
+def validate_cmd(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    hand_csv: Path = typer.Argument(..., help="CSV with columns frame and value (see "
+                                    "--make-template)."),
+    metric: str = typer.Option("extent_mm", help="Measurement column to compare."),
+    make_template: int = typer.Option(0, help="Instead of validating, write HAND_CSV with this "
+                                      "many evenly spaced frames to measure by hand."),
+) -> None:
+    """Compare automatic measurements with hand measurements (Bland-Altman agreement)."""
+    from fungus_cv.analyze.validate import validate, write_template
+
+    exp = _load_experiment(experiment)
+    try:
+        if make_template:
+            if hand_csv.exists():
+                raise ValueError(f"{hand_csv} already exists")
+            n = write_template(exp, hand_csv, make_template)
+            typer.echo(f"Wrote {hand_csv} with {n} frames. Measure each frame by hand (same "
+                       f"units as {metric}), fill in 'value', then run this command again "
+                       "without --make-template.")
+            return
+        a = validate(exp, hand_csv, metric)
+    except (ValueError, FileNotFoundError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{a.metric}: n = {a.n} frames")
+    typer.echo(f"  bias (automatic - hand) {a.bias:+.4f}  "
+               f"(95% CI {a.bias_ci95[0]:+.4f} to {a.bias_ci95[1]:+.4f})")
+    typer.echo(f"  95% limits of agreement {a.limits_of_agreement[0]:+.4f} to "
+               f"{a.limits_of_agreement[1]:+.4f}  (sd of differences {a.sd_diff:.4f})")
+    typer.echo(f"  MAE {a.mae:.4f}  RMSE {a.rmse:.4f}  r {a.pearson_r:.4f}  "
+               f"automatic = {a.slope:.4f} x hand {a.intercept:+.4f}")
+    typer.echo(f"  largest difference {a.worst_diff:+.4f} at {a.worst_frame}")
+    if a.unmatched:
+        typer.echo(f"  {len(a.unmatched)} hand row(s) not matched to analyzed frames: "
+                   f"{', '.join(a.unmatched[:5])}")
+    for f in a.files:
+        typer.echo(f"wrote {f}")
 
 
 # --- training your own models --------------------------------------------------------------

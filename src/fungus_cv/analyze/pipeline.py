@@ -16,12 +16,9 @@ import cv2
 import numpy as np
 
 from fungus_cv import __version__
-from fungus_cv.measure.geometry import (
-    ANNOTATIONS_NAME,
-    Annotations,
-    extent_uncertainty_mm,
-    measure_extent,
-)
+from fungus_cv.measure.centerline import CenterlineError, centerline_from_mask
+from fungus_cv.measure.geometry import ANNOTATIONS_NAME, Annotations, extent_uncertainty_mm
+from fungus_cv.measure.path import Polyline, measure_along_path
 from fungus_cv.preprocess.align import ECC_POOR, Alignment, align_frame
 from fungus_cv.preprocess.lighting import LightingNormalizer, LightingResult
 from fungus_cv.preprocess.markers import Scale, detect_markers, scale_from_markers
@@ -40,7 +37,10 @@ MEASUREMENT_FIELDS = [
     "timestamp_utc", "frame_file", "camera", "settings_hash",
     "align_method", "align_rms_px", "align_ecc", "align_scale", "align_shift_px",
     "target_px", "front_width_px", "extent_px", "extent_max_px", "extent_fraction",
-    "extent_mm", "extent_mm_unc", "extent_max_mm", "axis_length_mm",
+    "path_length_px", "covered_length_px", "covered_length_pct",
+    "reference_px", "reference_covered_pct",
+    "extent_mm", "extent_mm_unc", "extent_max_mm", "axis_length_mm", "covered_length_mm",
+    "reference_area_mm2",
     "target_area_mm2", "roi_area_mm2", "coverage_pct",
     "mean_brightness", "sharpness", "light_gain_b", "light_gain_g", "light_gain_r",
     "flags", "mask_file", "overlay_file",
@@ -213,18 +213,33 @@ class Analyzer:
         self.ref_sharpness = sharpness(self.raw_reference)
         if not with_segmenter:  # e.g. the prompt tool only needs aligned frames
             return
+        measure = self.cfg.measure
+        if measure.mode == "path" and measure.path_source == "reference" and \
+                self.cfg.reference.method == "none":
+            raise AnalysisError("measure.path_source: reference needs analysis.reference.method "
+                                "(color, sam2 or model) to segment the stem in each frame")
+        self.roi = self.annotations.roi_mask(self.reference.shape)
+        self.static_path = (self.annotations.polyline() if measure.mode == "path"
+                            else Polyline([self.annotations.base, self.annotations.tip]))
         try:
             self.segmenter = build_segmenter(self.cfg.target, experiment.root,
                                              self.annotations.roi)
+            self.reference_segmenter = None
+            if self.cfg.reference.method != "none":
+                self.reference_segmenter = build_segmenter(self.cfg.reference, experiment.root,
+                                                           self.annotations.roi)
         except (ValueError, RuntimeError, OSError) as exc:  # missing prompts, model, torch
             raise AnalysisError(str(exc)) from exc
         analysis_settings = self.cfg.model_dump(mode="json")
         analysis_settings["target"] = self.cfg.target.selected()
+        analysis_settings["reference"] = self.cfg.reference.selected()
         self.settings = {
             "fungus_cv_version": __version__,
             "reference_file": self.reference_row["file"],
             "analysis": analysis_settings,
             "segmenter": self.segmenter.describe(),
+            "reference_segmenter": (self.reference_segmenter.describe()
+                                    if self.reference_segmenter else None),
             "annotations": json.loads(ann_path.read_text(encoding="utf-8")),
             "rectification": self.rectification.to_dict() if self.rectification else None,
         }
@@ -291,33 +306,52 @@ class Analyzer:
         if not pending:
             return summary
 
-        if is_sequence_segmenter(self.segmenter):
-            results = self._run_sequence(pending, summary)
-        else:
-            results = self._run_per_frame(pending, summary)
-        for row in results:
+        if self.reference_segmenter is not None:
+            # Pass 1: the reference object (e.g. stem), saved so pass 2 can measure against it.
+            ref_summary = AnalysisSummary()
+            for i, _, ref_mask in self._iter_masks(self.reference_segmenter, pending,
+                                                   ref_summary):
+                path = self._reference_mask_path(i)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(path), ref_mask.astype(np.uint8) * 255)
+            if ref_summary.failed:
+                log.warning("reference segmentation failed for %d frame(s)", ref_summary.failed)
+
+        for i, prepared, mask in self._iter_masks(self.segmenter, pending, summary):
+            ref_mask = None
+            if self.reference_segmenter is not None:
+                ref_img = cv2.imread(str(self._reference_mask_path(i)), cv2.IMREAD_GRAYSCALE)
+                ref_mask = None if ref_img is None else ref_img > 127
+            row = self._measure(self.frames[i], prepared, mask, ref_mask)
             self._append(row)
             summary.processed += 1
             for flag in filter(None, row["flags"].split(";")):
                 summary.flagged[flag] += 1
         return summary
 
-    def _run_per_frame(self, pending: list[int], summary: AnalysisSummary):
+    def _reference_mask_path(self, index: int) -> Path:
+        return self.masks_dir / "reference" / f"{Path(self.frames[index]['file']).stem}.png"
+
+    def _iter_masks(self, segmenter, pending: list[int], summary: AnalysisSummary):
+        """Yield ``(index, prepared frame, mask)`` for pending frames, for any segmenter."""
+        if is_sequence_segmenter(segmenter):
+            yield from self._iter_sequence(segmenter, pending, summary)
+            return
         for i in pending:
             frame_row = self.frames[i]
             try:
                 prepared = self._prepare(frame_row)
-                mask = self.segmenter.segment(prepared.frame)
+                mask = segmenter.segment(prepared.frame)
             except AnalysisError as exc:
                 log.error("%s: %s", frame_row["file"], exc)
                 summary.failed += 1
                 continue
-            yield self._measure(frame_row, prepared, mask)
+            yield i, prepared, mask
 
-    def _run_sequence(self, pending: list[int], summary: AnalysisSummary):
-        """Memory-based segmenters see frames in order; only ``pending`` rows are written."""
+    def _iter_sequence(self, segmenter, pending: list[int], summary: AnalysisSummary):
+        """Memory-based segmenters see frames in order; only ``pending`` masks are yielded."""
         needed = set(pending)
-        cache: dict[int, tuple] = {}
+        cache: dict[int, Prepared] = {}
 
         def load(i: int) -> np.ndarray:
             if i not in cache:
@@ -329,9 +363,9 @@ class Analyzer:
 
         files = [r["file"] for r in self.frames]
         try:
-            for i, mask in self.segmenter.segment_sequence(files, load, needed):
+            for i, mask in segmenter.segment_sequence(files, load, needed):
                 prepared = cache.pop(i) if i in cache else self._prepare(self.frames[i])
-                yield self._measure(self.frames[i], prepared, mask)
+                yield i, prepared, mask
                 needed.discard(i)
                 done = len(pending) - len(needed)
                 if done % 10 == 0 or not needed:
@@ -393,12 +427,34 @@ class Analyzer:
                 raise AnalysisError(f"lighting correction failed: {exc}") from exc
         return Prepared(image, frame, alignment, lighting)
 
-    def _measure(self, frame_row: dict, prepared: Prepared, mask: np.ndarray) -> dict:
+    def _measure_path(self, mask: np.ndarray, ref_mask: np.ndarray | None,
+                      flags: list[str]) -> Polyline:
+        measure = self.cfg.measure
+        if measure.mode != "path" or measure.path_source != "reference":
+            return self.static_path
+        if ref_mask is None:
+            flags.append("no_reference")
+            return self.static_path
+        try:
+            # The object includes its target: moss can cover the stem completely.
+            return centerline_from_mask((ref_mask | mask) & self.roi, self.annotations.base,
+                                        measure.smooth_px)
+        except CenterlineError as exc:
+            log.warning("centerline failed (%s); using the annotated path", exc)
+            flags.append("centerline_failed")
+            return self.static_path
+
+    def _measure(self, frame_row: dict, prepared: Prepared, mask: np.ndarray,
+                 ref_mask: np.ndarray | None = None) -> dict:
         exp = self.experiment
         image, alignment = prepared.image, prepared.alignment
-        m = measure_extent(mask, self.annotations, self.cfg.front_percentile)
-
         flags = []
+        path = self._measure_path(mask, ref_mask, flags)
+        m = measure_along_path(
+            mask, path, self.roi, self.cfg.front_percentile, self.cfg.measure.corridor_px,
+            reference_mask=None if ref_mask is None else (ref_mask | mask),
+        )
+
         if alignment.method == "failed":
             flags.append("align_failed")
         elif (alignment.rms_px is not None and alignment.rms_px > 2) or \
@@ -434,6 +490,13 @@ class Analyzer:
             "extent_px": _fmt(m.extent_px, 2),
             "extent_max_px": _fmt(m.extent_max_px, 2),
             "extent_fraction": _fmt(m.extent_fraction, 5),
+            "path_length_px": _fmt(m.path_length_px, 2),
+            "covered_length_px": _fmt(m.covered_length_px, 1),
+            "covered_length_pct": _fmt(100 * m.covered_length_px / m.path_length_px
+                                       if m.path_length_px else 0.0, 3),
+            "reference_px": "" if m.reference_px is None else m.reference_px,
+            "reference_covered_pct": "" if m.reference_covered_fraction is None
+            else _fmt(100 * m.reference_covered_fraction, 3),
             "coverage_pct": _fmt(100 * m.coverage_fraction, 3),
             "mean_brightness": _fmt(brightness, 2),
             "sharpness": _fmt(sharp, 2),
@@ -442,6 +505,7 @@ class Analyzer:
             "light_gain_r": light.gains[2] if light else "",
             "flags": ";".join(flags),
             "extent_mm": "", "extent_mm_unc": "", "extent_max_mm": "", "axis_length_mm": "",
+            "covered_length_mm": "", "reference_area_mm2": "",
             "target_area_mm2": "", "roi_area_mm2": "", "mask_file": "", "overlay_file": "",
         }
         if self.scale is not None:
@@ -453,7 +517,10 @@ class Analyzer:
                     None if alignment.rms_px is None
                     else alignment.rms_px * self.align_px_factor), 3),
                 "extent_max_mm": _fmt(m.extent_max_px * k, 3),
-                "axis_length_mm": _fmt(self.annotations.axis_length_px * k, 3),
+                "axis_length_mm": _fmt(m.path_length_px * k, 3),
+                "covered_length_mm": _fmt(m.covered_length_px * k, 3),
+                "reference_area_mm2": "" if m.reference_px is None
+                else _fmt(m.reference_px * k * k, 2),
                 "target_area_mm2": _fmt(m.target_px * k * k, 2),
                 "roi_area_mm2": _fmt(m.roi_area_px * k * k, 2),
             })
@@ -467,7 +534,8 @@ class Analyzer:
         if self.cfg.save_overlays:
             from fungus_cv.analyze.overlay import draw_overlay
 
-            overlay = draw_overlay(prepared.frame, mask, self.annotations, m, row)
+            overlay = draw_overlay(prepared.frame, mask, self.annotations, m, row, path=path,
+                                   reference_mask=ref_mask)
             overlay_path = self.results_dir / "overlays" / self.settings_hash / f"{stem}.jpg"
             overlay_path.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(overlay_path), overlay, [cv2.IMWRITE_JPEG_QUALITY, 90])

@@ -209,6 +209,36 @@ class LightingConfig(BaseModel):
     flag_change: float = Field(0.3, gt=0)  # flag frames whose gains differ from 1 by more
 
 
+class ReferenceConfig(BaseModel):
+    """Optional per-frame segmentation of the reference object (e.g. the plant stem)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["none", "color", "sam2", "model"] = "none"
+    color: ColorTargetConfig = Field(default_factory=ColorTargetConfig)
+    sam2: Sam2TargetConfig = Field(
+        default_factory=lambda: Sam2TargetConfig(prompts_file="reference_prompts.json"))
+    model: ModelTargetConfig = Field(default_factory=ModelTargetConfig)
+
+    def selected(self) -> dict:
+        if self.method == "none":
+            return {"method": "none"}
+        return {"method": self.method,
+                self.method: getattr(self, self.method).model_dump(mode="json")}
+
+
+class MeasureConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # axis: straight line base -> tip.  path: along a curved centerline (e.g. a stem).
+    mode: Literal["axis", "path"] = "axis"
+    # For mode path: the line clicked in `fungus annotate`, or the centerline of the
+    # reference object segmented in every frame (follows a stem that bends or grows).
+    path_source: Literal["annotation", "reference"] = "annotation"
+    corridor_px: float | None = Field(None, gt=0)  # ignore target further from the path
+    smooth_px: float | None = Field(None, gt=0)  # centerline smoothing; None = automatic
+
+
 class AnalysisConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -218,6 +248,8 @@ class AnalysisConfig(BaseModel):
     rectify: RectifyConfig = Field(default_factory=RectifyConfig)
     lighting: LightingConfig = Field(default_factory=LightingConfig)
     target: TargetConfig = Field(default_factory=TargetConfig)
+    reference: ReferenceConfig = Field(default_factory=ReferenceConfig)
+    measure: MeasureConfig = Field(default_factory=MeasureConfig)
     # Front position across the object's width: 50 = median front, 100 = highest point.
     front_percentile: float = Field(50.0, ge=0, le=100)
     save_masks: bool = True
@@ -331,6 +363,38 @@ analysis:
       tile_px: 512        # large frames are processed in overlapping tiles
       overlap_px: 64
       min_blob_area_px: 0
+  reference:              # optional: segment the reference object (e.g. stem) in every frame
+    method: none          # none | color | sam2 | model (same settings blocks as target)
+    color:
+      hsv_ranges:
+        - lower: [5, 80, 40]
+          upper: [25, 255, 200]
+      open_px: 3
+      close_px: 7
+      min_blob_area_px: 50
+    sam2:
+      model: facebook/sam2.1-hiera-small
+      device: auto
+      prompts_file: reference_prompts.json  # `fungus prompt --reference`
+      crop_to_roi: true
+      crop_margin_px: 32
+      mask_threshold: 0.0
+      min_blob_area_px: 0
+    model:
+      path: ""
+      device: auto
+      crop_to_roi: true
+      crop_margin_px: 32
+      threshold: null
+      tile_px: 512
+      overlap_px: 64
+      min_blob_area_px: 0
+  measure:
+    mode: axis            # axis: straight base->tip | path: along a curved object (stem)
+    path_source: annotation  # annotation: line clicked in annotate | reference: centerline
+                             # of the reference object in each frame (needs reference.method)
+    corridor_px: null     # ignore target further than this from the path (null = whole region)
+    smooth_px: null       # centerline smoothing length; null = about twice the stem width
   front_percentile: 50    # front across the width: 50 = median, 100 = highest point
   save_masks: true
   save_overlays: true

@@ -63,75 +63,88 @@ class _View:
 
 
 def annotate(image: np.ndarray, reference_file: str = "") -> Annotations:
-    """Click base, tip, the region-of-interest polygon, then optionally a neutral patch."""
+    """Click the base, a line to the tip, the region polygon, then optionally a neutral patch.
+
+    For a straight object click only the tip after the base; for a curved one (a stem) click
+    several points along it, ending at the tip.
+    """
     view = _View(image, "fungus annotate")
-    points: list[tuple[float, float]] = []  # base, tip, roi...
-    patch: list[tuple[float, float]] = []
-    state = {"roi_done": False}
+    stages = ["base", "path", "roi", "patch"]
+    clicks: dict[str, list[tuple[float, float]]] = {k: [] for k in stages}
+    state = {"stage": 0}
 
     def on_mouse(event, x, y, flags, param):
         view.mouse = (x, y)
         if event == cv2.EVENT_LBUTTONDOWN:
-            (patch if state["roi_done"] else points).append(view.to_full(x, y))
+            stage = stages[state["stage"]]
+            clicks[stage].append(view.to_full(x, y))
+            if stage == "base":
+                state["stage"] = 1
 
     cv2.setMouseCallback(view.window, on_mouse)
     nudges = {ord("i"): (0, -1), ord("k"): (0, 1), ord("j"): (-1, 0), ord("l"): (1, 0)}
-    prompts = [
-        "1/4  Click the BASE: where growth starts (waterline, soil line)",
-        "2/4  Click the TIP: the far end of the object (top of towel/stem)",
-    ]
+    prompts = {
+        "base": "1/4  Click the BASE: where growth starts (waterline, soil line)",
+        "path": "2/4  Click to the TIP (top of towel/stem). Curved stem: click points along it, "
+                "then the tip. Enter when done",
+        "roi": "3/4  Click corners AROUND the object, Enter when done",
+        "patch": "4/4  Optional: click corners of a NEUTRAL PATCH (white/grey card). "
+                 "Enter to finish or skip",
+    }
     try:
         while True:
+            stage = stages[state["stage"]]
             canvas = view.base.copy()
-            if points:
-                cv2.circle(canvas, view.to_view(points[0]), 5, (0, 200, 0), -1)
-            if len(points) >= 2:
-                cv2.line(canvas, view.to_view(points[0]), view.to_view(points[1]), (0, 200, 0), 2)
-            roi = points[2:]
-            if roi:
-                poly = np.array([view.to_view(p) for p in roi], np.int32)
-                cv2.polylines(canvas, [poly], len(roi) > 2, (0, 255, 255), 2)
-            if patch:
-                poly = np.array([view.to_view(p) for p in patch], np.int32)
-                cv2.polylines(canvas, [poly], len(patch) > 2, (255, 200, 0), 2)
-            if state["roi_done"]:
-                stage = (f"4/4  Optional: click corners of a NEUTRAL PATCH (white/grey card) "
-                         f"({len(patch)} so far). Enter to finish or skip")
-            elif len(points) < 2:
-                stage = prompts[len(points)]
-            else:
-                stage = f"3/4  Click corners AROUND the object ({len(roi)} so far), Enter when done"
-            active = patch if state["roi_done"] else points
+            line = clicks["base"] + clicks["path"]
+            if clicks["base"]:
+                cv2.circle(canvas, view.to_view(clicks["base"][0]), 5, (0, 200, 0), -1)
+            if len(line) >= 2:
+                cv2.polylines(canvas, [np.array([view.to_view(p) for p in line], np.int32)],
+                              False, (0, 200, 0), 2)
+            for key_name, color in (("roi", (0, 255, 255)), ("patch", (255, 200, 0))):
+                pts = clicks[key_name]
+                if pts:
+                    poly = np.array([view.to_view(p) for p in pts], np.int32)
+                    cv2.polylines(canvas, [poly], len(pts) > 2, color, 2)
+            active = clicks[stage] if clicks[stage] else (
+                clicks[stages[state["stage"] - 1]] if state["stage"] else [])
             view.magnifier(canvas)
             last = f"last point ({active[-1][0]:.1f}, {active[-1][1]:.1f})" if active else ""
-            view.show(canvas, [stage, "u: undo   r: restart   i/j/k/l: nudge last point 1 px   "
+            view.show(canvas, [f"{prompts[stage]} ({len(clicks[stage])} clicked)",
+                               "u: undo   r: restart   i/j/k/l: nudge last point 1 px   "
                                "Esc: cancel", last])
 
             key = cv2.waitKey(20) & 0xFF
             if key == ESC:
                 raise Cancelled()
             if key == ord("u"):
-                if patch:
-                    patch.pop()
-                elif state["roi_done"]:
-                    state["roi_done"] = False
-                elif points:
-                    points.pop()
+                if clicks[stage]:
+                    clicks[stage].pop()
+                elif state["stage"] > 0:
+                    state["stage"] -= 1
+                    prev = stages[state["stage"]]
+                    if prev == "base":
+                        clicks["base"].clear()
             elif key in nudges and active:
                 dx, dy = nudges[key]
                 active[-1] = (active[-1][0] + dx, active[-1][1] + dy)
             elif key == ord("r"):
-                points.clear()
-                patch.clear()
-                state["roi_done"] = False
+                for v in clicks.values():
+                    v.clear()
+                state["stage"] = 0
             elif key in ENTER_KEYS:
-                if not state["roi_done"] and len(roi) >= 3:
-                    state["roi_done"] = True
-                elif state["roi_done"] and (not patch or len(patch) >= 3):
+                if stage == "path" and clicks["path"]:
+                    state["stage"] = 2
+                elif stage == "roi" and len(clicks["roi"]) >= 3:
+                    state["stage"] = 3
+                elif stage == "patch" and (not clicks["patch"] or len(clicks["patch"]) >= 3):
                     h, w = image.shape[:2]
+                    path = clicks["base"] + clicks["path"]
                     return Annotations(
-                        base=points[0], tip=points[1], roi=roi, image_size=(w, h),
-                        reference_file=reference_file, reference_patch=patch or None,
+                        base=path[0], tip=path[-1], roi=clicks["roi"], image_size=(w, h),
+                        reference_file=reference_file,
+                        reference_patch=clicks["patch"] or None,
+                        path=path if len(path) > 2 else None,
                     )
     finally:
         cv2.destroyWindow(view.window)

@@ -2,7 +2,7 @@
 
 Take time-lapse photos with a webcam, then measure how a spreading region (dye, moss, an infection) moves relative to a reference object over time. See [PLAN.md](PLAN.md) for the full roadmap.
 
-**Status:** capture (M1), color-threshold measurement (M2), SAM 2 segmentation (M3), robustness to tilt/lighting/jumps (M4) and training your own models (M7) all work.
+**Status:** capture (M1), color-threshold measurement (M2), SAM 2 segmentation (M3), robustness to tilt/lighting/jumps (M4), measuring along curved stems (M5) and training your own models (M7) all work. Field coverage (M6) is next.
 
 Works on Windows, macOS and Linux (Python 3.10+).
 
@@ -84,6 +84,48 @@ It outputs parameters ± standard errors, R², and AIC (lower AIC = better model
 - Markers must lie in the same plane as the object, and the camera should face that plane square-on. The analysis warns if marker edges disagree by more than 2%, which suggests a tilted view.
 - Set `--t0` to the moment the towel touched the dye. Otherwise t = 0 is the first photo.
 - The dye-edge position depends on the color thresholds. To estimate that uncertainty, re-run with slightly wider and narrower `hsv_ranges` and compare. Archived results make this easy.
+
+## Moss on a plant stem (curved objects)
+
+Set `analysis.measure.mode: path` to measure **along the stem** by arc length, instead of along a straight line.
+
+- **Clicked path** (`path_source: annotation`): in `fungus annotate`, click the soil line, then several points up the stem to its tip. This suits a stem that doesn't move.
+- **Stem segmented in every frame** (`path_source: reference`): set `analysis.reference.method` (color, sam2 or model; same settings blocks as `target`). This follows a stem that bends, sways or grows.
+  - **Centerline:** the stem mask plus its moss (moss can cover the stem completely) is thinned to a skeleton. The longest branch from the soil line is kept, so side shoots and leaves are dropped. The far end is extended to the stem's edge, then smoothed over about twice the stem width; unsmoothed pixel tracing overstates length by up to 8%.
+  - **SAM prompts:** for `reference.method: sam2`, prompt the stem with `fungus prompt --reference`.
+  - **Saved masks:** stem masks are stored in `results/masks/<run>/reference/`, and overlays show the stem outline and the centerline.
+
+Measurements (in addition to the usual columns):
+
+| Column | Meaning |
+|---|---|
+| `extent_mm` / `extent_max_mm` | how far up the stem the moss reaches (median across the stem width / highest point), by arc length from the soil line |
+| `axis_length_mm` | stem length along the centerline |
+| `covered_length_mm`, `covered_length_pct` | length of stem with moss beside it, and as % of stem length (patchy infections count only the covered parts) |
+| `reference_covered_pct` | % of the stem's area covered by moss |
+
+`corridor_px` ignores moss further than that from the centerline, e.g. on the soil or on a neighboring plant. Use `fungus report --metric covered_length_pct` with the logistic model for infection curves.
+
+On synthetic curved, swaying stems, centerline length was within 0.5% and moss extent within 1.5 px of the truth.
+
+**The stem is measured as it appears in the image.** Parts bending toward or away from the camera look shorter. Use a camera view perpendicular to the plant, or two cameras.
+
+### Checking against hand measurements (for publication)
+
+```bash
+fungus validate experiments/moss-1 hand.csv --make-template 20   # 20 evenly spaced frames
+# measure those frames by hand (e.g. calipers or ImageJ), fill in the 'value' column
+fungus validate experiments/moss-1 hand.csv --metric extent_mm
+```
+
+This reports Bland–Altman agreement between automatic and hand values:
+
+- bias with its 95% CI
+- 95% limits of agreement
+- MAE, RMSE, Pearson r, and the regression line
+- the frame with the largest difference
+
+It also writes paired values and an agreement plot to `results/validation/`. If several people measure, add an `observer` column to track who measured each frame.
 
 ## Robustness: tilted cameras, changing light, bad frames
 
@@ -177,7 +219,7 @@ experiments/dye-test-1/
   frames/         # 2026-09-20T14-05-00.123Z_cam0.png ... (UTC time, sorts in time order)
   frames.csv      # one row per image or failed attempt (see below)
   capture.log
-  annotations.json  # base, tip, region and optional neutral patch (from `fungus annotate`)
+  annotations.json  # base, path to tip, region, optional neutral patch (`fungus annotate`)
   prompts.json    # SAM clicks (from `fungus prompt`)
   results/        # measurements.csv, run_info.json, report/, archive/,
                   # masks/<run>/, overlays/<run>/, runs/<run>.json, compare/

@@ -6,11 +6,13 @@ import cv2
 import numpy as np
 
 from fungus_cv.measure.geometry import Annotations, ExtentMeasurement
+from fungus_cv.measure.path import Polyline
 
 MASK_COLOR = (255, 0, 255)  # magenta: stands out against blue dye and green moss
 ROI_COLOR = (0, 255, 255)
 AXIS_COLOR = (0, 200, 0)
 FRONT_COLOR = (0, 0, 255)
+REFERENCE_COLOR = (255, 160, 0)
 
 
 def _text(img: np.ndarray, text: str, org: tuple[int, int], scale: float) -> None:
@@ -25,6 +27,8 @@ def draw_overlay(
     ann: Annotations,
     m: ExtentMeasurement,
     row: dict,
+    path: Polyline | None = None,
+    reference_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     out = image.copy()
     tint = out.copy()
@@ -36,17 +40,19 @@ def draw_overlay(
     roi = np.round(np.array(ann.roi)).astype(np.int32)
     cv2.polylines(out, [roi], True, ROI_COLOR, lw)
 
-    base = np.array(ann.base, float)
-    tip = np.array(ann.tip, float)
-    direction = (tip - base) / ann.axis_length_px
-    normal = np.array([-direction[1], direction[0]])
-    cv2.line(out, tuple(np.round(base).astype(int)), tuple(np.round(tip).astype(int)),
-             AXIS_COLOR, lw)
-    cv2.circle(out, tuple(np.round(base).astype(int)), 3 * lw, AXIS_COLOR, -1)
+    if reference_mask is not None:
+        contours, _ = cv2.findContours(reference_mask.astype(np.uint8), cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(out, contours, -1, REFERENCE_COLOR, lw)
 
-    # Front: a line across the axis at the measured extent.
-    half = max(20.0, 0.1 * ann.axis_length_px)
-    front = base + direction * m.extent_px
+    path = path or Polyline([ann.base, ann.tip])
+    cv2.polylines(out, [np.round(path.dense[::4]).astype(np.int32)], False, AXIS_COLOR, lw)
+    cv2.circle(out, tuple(np.round(path.dense[0]).astype(int)), 3 * lw, AXIS_COLOR, -1)
+
+    # Front: a line across the path at the measured extent.
+    half = max(20.0, 0.1 * min(path.length, 400))
+    front, tangent = path.point_at(m.extent_px)
+    normal = np.array([-tangent[1], tangent[0]])
     p1 = tuple(np.round(front - normal * half).astype(int))
     p2 = tuple(np.round(front + normal * half).astype(int))
     cv2.line(out, p1, p2, FRONT_COLOR, 2 * lw)
@@ -59,7 +65,8 @@ def draw_overlay(
         extent = f"extent {row['extent_px']} px"
     lines = [
         row["timestamp_utc"],
-        f"{extent}   coverage {row['coverage_pct']}%",
+        f"{extent}   coverage {row['coverage_pct']}%   length covered "
+        f"{row.get('covered_length_pct', '')}%",
         f"align {row['align_method']}" + (f"  rms {row['align_rms_px']} px"
                                            if row.get("align_rms_px") != "" else ""),
     ]

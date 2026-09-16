@@ -178,7 +178,11 @@ def make_report(
     # --- main plot: metric over time with fits ---------------------------------------
     label = {"extent_mm": "Extent (mm)", "extent_px": "Extent (px)",
              "coverage_pct": "Coverage (%)", "extent_fraction": "Extent (fraction of axis)",
-             "target_area_mm2": "Area (mm²)"}.get(metric, metric)
+             "target_area_mm2": "Area (mm²)",
+             "extent_max_mm": "Highest point (mm)",
+             "covered_length_pct": "Length covered (%)",
+             "covered_length_mm": "Length covered (mm)",
+             "reference_covered_pct": "Object area covered (%)"}.get(metric, metric)
     fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
     _style(ax)
     if np.isfinite(unc[use]).any():

@@ -27,9 +27,16 @@ dev = ["pytest>=8", "ruff>=0.5"]
 # SAM 2 segmentation. For an NVIDIA GPU on Windows/Linux, install the CUDA build of torch
 # first (https://pytorch.org/get-started/locally/), then this extra.
 sam = ["torch>=2.5", "torchvision>=0.20", "transformers>=4.56"]
+# Desktop app: `fungus gui`
+gui = ["PySide6-Essentials>=6.6"]
+# Building the standalone app (see packaging/README.md)
+app = ["PySide6-Essentials>=6.6", "pyinstaller>=6.6"]
 
 [project.scripts]
 fungus = "fungus_cv.cli:app"
+
+[project.gui-scripts]
+fungus-cv = "fungus_cv.gui.app:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fungus_cv"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -401,29 +402,94 @@ analysis:
 """
 
 
-def replace_hsv_ranges_in_yaml(text: str, ranges) -> str:
-    """Swap the ``hsv_ranges:`` block in config text, keeping all other lines and comments."""
+def replace_hsv_ranges_in_yaml(text: str, ranges, section: str = "target") -> str:
+    """Swap ``analysis.<section>.color.hsv_ranges`` in config text, keeping all other lines.
+
+    ``section`` is ``target`` or ``reference``. Configs without that structure fall back to
+    the first ``hsv_ranges:`` block.
+    """
     lines = text.splitlines(keepends=True)
-    for i, line in enumerate(lines):
-        match = re.match(r"^(\s*)hsv_ranges:", line)
-        if not match:
-            continue
-        indent = len(match.group(1))
-        end = i + 1
-        while end < len(lines):
-            stripped = lines[end].strip()
-            current = len(lines[end]) - len(lines[end].lstrip())
-            if stripped and not stripped.startswith("#") and current <= indent:
+    try:
+        i = _find_key_line(lines, f"analysis.{section}.color.hsv_ranges")
+    except KeyError:
+        i = next((k for k, line in enumerate(lines) if re.match(r"^\s*hsv_ranges:", line)), None)
+        if i is None:
+            raise ValueError("no hsv_ranges: entry found in config") from None
+    indent = len(lines[i]) - len(lines[i].lstrip(" "))
+    end = i + 1
+    while end < len(lines):
+        stripped = lines[end].strip()
+        current = len(lines[end]) - len(lines[end].lstrip())
+        if stripped and current <= indent:
+            break
+        end += 1
+    pad = " " * (indent + 2)
+    block = [f"{' ' * indent}hsv_ranges:\n"]
+    for lower, upper in ranges:
+        block.append(f"{pad}- lower: [{', '.join(map(str, lower))}]\n")
+        block.append(f"{pad}  upper: [{', '.join(map(str, upper))}]\n")
+    new_text = "".join(lines[:i] + block + lines[end:])
+    yaml.safe_load(new_text)  # never write a config that no longer parses
+    return new_text
+
+
+def _find_key_line(lines: list[str], dotted_key: str) -> int:
+    """Index of the line holding ``dotted_key``, following YAML indentation."""
+    keys = dotted_key.split(".")
+    start, parent_indent = 0, -1
+    for depth, key in enumerate(keys):
+        child_indent = None
+        found = None
+        for i in range(start, len(lines)):
+            raw = lines[i].rstrip("\n")
+            stripped = raw.lstrip(" ")
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(raw) - len(stripped)
+            if indent <= parent_indent:
                 break
-            if stripped.startswith("#") and current <= indent:
+            if child_indent is None:
+                child_indent = indent
+            if indent == child_indent and re.match(rf"{re.escape(key)}\s*:", stripped):
+                found = i
                 break
-            end += 1
-        pad = " " * (indent + 2)
-        block = [f"{' ' * indent}hsv_ranges:\n"]
-        for lower, upper in ranges:
-            block.append(f"{pad}- lower: [{', '.join(map(str, lower))}]\n")
-            block.append(f"{pad}  upper: [{', '.join(map(str, upper))}]\n")
-        new_text = "".join(lines[:i] + block + lines[end:])
-        yaml.safe_load(new_text)  # never write a config that no longer parses
-        return new_text
-    raise ValueError("no hsv_ranges: entry found in config")
+        if found is None:
+            raise KeyError(dotted_key)
+        if depth == len(keys) - 1:
+            return found
+        start, parent_indent = found + 1, child_indent
+    raise KeyError(dotted_key)
+
+
+def _yaml_scalar(value) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    text = str(value)
+    if re.fullmatch(r"[A-Za-z0-9_./+-]+", text) and \
+            yaml.safe_load(text) == text:  # plain word that YAML reads back as the same string
+        return text
+    return json.dumps(text)
+
+
+def set_yaml_value(text: str, dotted_key: str, value) -> str:
+    """Set one scalar, e.g. ``capture.interval``, keeping every other line and comment.
+
+    Raises ``KeyError`` if the key is not in the text (add it by editing the file instead).
+    """
+    lines = text.splitlines(keepends=True)
+    found = _find_key_line(lines, dotted_key)
+    raw = lines[found].rstrip("\n")
+    match = re.match(r"^(\s*[^:#]+:[ \t]*)(.*?)([ \t]+#.*)?$", raw)
+    comment = match.group(3) or ""
+    prefix = match.group(1) if match.group(1).endswith((" ", "\t")) else match.group(1) + " "
+    new_line = prefix + _yaml_scalar(value)
+    if comment:
+        new_line = new_line.ljust(len(match.group(1)) + len(match.group(2))) + comment
+    lines[found] = new_line + ("\n" if lines[found].endswith("\n") else "")
+    new_text = "".join(lines)
+    yaml.safe_load(new_text)  # never produce a file that no longer parses
+    return new_text

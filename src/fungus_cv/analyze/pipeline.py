@@ -68,6 +68,7 @@ class AnalysisSummary:
     failed: int = 0
     flagged: Counter = field(default_factory=Counter)
     settings_hash: str = ""
+    stopped: bool = False
 
 
 def _fmt(value, digits: int = 4):
@@ -298,7 +299,12 @@ class Analyzer:
 
     # --- processing ----------------------------------------------------------------
 
-    def run(self, force: bool = False) -> AnalysisSummary:
+    def run(self, force: bool = False, progress=None, should_stop=None) -> AnalysisSummary:
+        """Measure pending frames.
+
+        ``progress(done, total, stage)`` is called after each frame; ``should_stop()`` is
+        checked between frames so a GUI can cancel (finished frames stay saved).
+        """
         self.results_dir.mkdir(exist_ok=True)
         if force and self.measurements_path.exists():
             self.measurements_path.unlink()
@@ -313,8 +319,12 @@ class Analyzer:
         if self.reference_segmenter is not None:
             # Pass 1: the reference object (e.g. stem), saved so pass 2 can measure against it.
             ref_summary = AnalysisSummary()
-            for i, _, ref_mask in self._iter_masks(self.reference_segmenter, pending,
-                                                   ref_summary):
+            for n, (i, _, ref_mask) in enumerate(self._iter_masks(self.reference_segmenter,
+                                                                  pending, ref_summary), 1):
+                if should_stop and should_stop():
+                    return summary
+                if progress:
+                    progress(n, len(pending), "reference")
                 path = self._reference_mask_path(i)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 cv2.imwrite(str(path), ref_mask.astype(np.uint8) * 255)
@@ -322,6 +332,9 @@ class Analyzer:
                 log.warning("reference segmentation failed for %d frame(s)", ref_summary.failed)
 
         for i, prepared, mask in self._iter_masks(self.segmenter, pending, summary):
+            if should_stop and should_stop():
+                summary.stopped = True
+                break
             ref_mask = None
             if self.reference_segmenter is not None:
                 ref_img = cv2.imread(str(self._reference_mask_path(i)), cv2.IMREAD_GRAYSCALE)
@@ -332,6 +345,8 @@ class Analyzer:
                 for flag in filter(None, row["flags"].split(";")):
                     summary.flagged[flag] += 1
             summary.processed += 1
+            if progress:
+                progress(summary.processed, len(pending), "measure")
         return summary
 
     def _reference_mask_path(self, index: int) -> Path:

@@ -1,0 +1,190 @@
+"""Main window: a sidebar of workflow steps and one page per step."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from PySide6.QtCore import QSize, Qt, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QStackedWidget,
+    QWidget,
+)
+
+from fungus_cv import __version__
+from fungus_cv.gui.pages.analyze import AnalyzePage
+from fungus_cv.gui.pages.camera import CameraPage
+from fungus_cv.gui.pages.capture import CapturePage
+from fungus_cv.gui.pages.doctor import DoctorPage
+from fungus_cv.gui.pages.experiment import ExperimentPage
+from fungus_cv.gui.pages.report import ReportPage
+from fungus_cv.gui.pages.setup import SetupPage
+from fungus_cv.gui.qt_util import APP_NAME, log_dir, preload_modules, show_error
+from fungus_cv.gui.state import AppState
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, state: AppState | None = None, log_handler=None):
+        super().__init__()
+        preload_modules()
+        self.state = state or AppState()
+        self.setWindowTitle(APP_NAME)
+        self.resize(1320, 860)
+
+        self.nav = QListWidget()
+        self.nav.setIconSize(QSize(18, 18))
+        self.nav.setFixedWidth(190)
+        self.stack = QStackedWidget()
+        self.pages = [
+            ("Experiment", ExperimentPage(self.state, self)),
+            ("Camera", CameraPage(self.state)),
+            ("Capture", CapturePage(self.state, log_handler)),
+            ("Set up measurement", SetupPage(self.state)),
+            ("Analyze", AnalyzePage(self.state)),
+            ("Report", ReportPage(self.state)),
+            ("Diagnostics", DoctorPage(self.state)),
+        ]
+        for title, page in self.pages:
+            self.nav.addItem(QListWidgetItem(title))
+            self.stack.addWidget(page)
+        self.nav.currentRowChanged.connect(self._show_page)
+        self.nav.setCurrentRow(0)
+
+        self.nav.setObjectName("nav")
+        self.nav.setStyleSheet(
+            "#nav { border: none; font-size: 14px; padding-top: 8px; }"
+            "#nav::item { padding: 9px 12px; border-radius: 6px; margin: 1px 6px; }"
+            "#nav::item:selected { background: palette(highlight); "
+            "color: palette(highlighted-text); }")
+        central = QWidget()
+        row = QHBoxLayout(central)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(self.nav)
+        divider = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setFrameShadow(QFrame.Sunken)
+        row.addWidget(divider)
+        row.addWidget(self.stack, 1)
+        self.setCentralWidget(central)
+
+        self.experiment_label = QLabel("No experiment open")
+        self.statusBar().addPermanentWidget(self.experiment_label)
+        self.state.experiment_changed.connect(self._experiment_changed)
+        self._build_menu()
+
+    # --- navigation ----------------------------------------------------------------------
+
+    def _show_page(self, row: int) -> None:
+        self.stack.setCurrentIndex(row)
+        page = self.stack.currentWidget()
+        if hasattr(page, "on_shown"):
+            page.on_shown()
+
+    def go_to(self, title: str) -> None:
+        for row, (name, _) in enumerate(self.pages):
+            if name == title:
+                self.nav.setCurrentRow(row)
+
+    def _experiment_changed(self, experiment) -> None:
+        if experiment is None:
+            self.experiment_label.setText("No experiment open")
+            self.setWindowTitle(APP_NAME)
+        else:
+            self.experiment_label.setText(f"{experiment.config.name}  —  {experiment.root}")
+            self.setWindowTitle(f"{experiment.config.name} — {APP_NAME}")
+
+    # --- menu ----------------------------------------------------------------------------
+
+    def _build_menu(self) -> None:
+        file_menu = self.menuBar().addMenu("&File")
+        new_action = QAction("New Experiment…", self, shortcut=QKeySequence.New)
+        new_action.triggered.connect(self.new_experiment)
+        open_action = QAction("Open Experiment…", self, shortcut=QKeySequence.Open)
+        open_action.triggered.connect(self.open_experiment)
+        reveal = QAction("Show Experiment Folder", self)
+        reveal.triggered.connect(self.reveal_experiment)
+        quit_action = QAction("Quit", self, shortcut=QKeySequence.Quit)
+        quit_action.triggered.connect(self.close)
+        for action in (new_action, open_action, reveal):
+            file_menu.addAction(action)
+        file_menu.addSeparator()
+        file_menu.addAction(quit_action)
+
+        help_menu = self.menuBar().addMenu("&Help")
+        logs = QAction("Open Log Folder", self)
+        logs.triggered.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(
+            str(log_dir()))))
+        about = QAction(f"About {APP_NAME}", self)
+        about.triggered.connect(lambda: QMessageBox.about(
+            self, APP_NAME, f"<b>{APP_NAME}</b> {__version__}<br>Time-lapse capture and "
+                            "measurement of spreading growth."))
+        help_menu.addAction(logs)
+        help_menu.addAction(about)
+
+    def new_experiment(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Choose where to create the experiment folder", str(Path.home()))
+        if not folder:
+            return
+        name, ok = QInputDialog.getText(self, "New experiment", "Experiment name "
+                                        "(also the folder name):")
+        if not ok or not name.strip():
+            return
+        path = Path(folder) / name.strip()
+        try:
+            self.state.create(path, name.strip())
+        except (OSError, ValueError) as exc:
+            show_error(self, "Could not create experiment", str(exc))
+            return
+        self.go_to("Experiment")
+
+    def open_experiment(self, path: str | Path | None = None) -> None:
+        if not path:
+            path = QFileDialog.getExistingDirectory(self, "Open experiment folder",
+                                                    str(Path.home()))
+            if not path:
+                return
+        try:
+            self.state.open(Path(path))
+        except (OSError, ValueError) as exc:
+            show_error(self, "Could not open experiment",
+                       f"{path}\n\n{exc}\n\nChoose a folder containing config.yaml.")
+
+    def reveal_experiment(self) -> None:
+        if self.state.experiment is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.state.experiment.root)))
+
+    # --- shutdown ------------------------------------------------------------------------
+
+    def closeEvent(self, event):  # noqa: N802 - Qt API
+        if self.state.capturing:
+            answer = QMessageBox.question(
+                self, "Capture running",
+                "A capture is running. Stop it and quit? Frames already saved are kept.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                event.ignore()
+                return
+        for _, page in self.pages:
+            if hasattr(page, "shutdown"):
+                page.shutdown()
+        event.accept()
+
+    def keyPressEvent(self, event):  # noqa: N802
+        page = self.stack.currentWidget()
+        if hasattr(page, "handle_key") and page.handle_key(event):
+            return
+        super().keyPressEvent(event)
+
+
+__all__ = ["MainWindow", "Qt"]

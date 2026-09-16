@@ -54,7 +54,7 @@ def test_responsible_app_falls_back_to_term_program(monkeypatch):
     (CameraAccess(DENIED, "Terminal"), "Turn it on"),
     (CameraAccess(RESTRICTED, "Terminal"), "restricted"),
     (CameraAccess(NOT_DETERMINED, "Claude", prompt_refused=True, requested=True),
-     "will not show a camera permission prompt for Claude"),
+     "Terminal app"),
     (CameraAccess(NOT_DETERMINED, "iTerm", requested=True), "Click Allow"),
     (CameraAccess(NOT_DETERMINED, "iTerm"), "hasn't been decided"),
 ])

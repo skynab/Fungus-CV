@@ -41,6 +41,7 @@ class CameraAccess:
     def advice(self) -> str:
         app = self.app or "the app you are running this from (e.g. Terminal)"
         settings = "System Settings > Privacy & Security > Camera"
+        in_desktop_app = running_as_app()
         if self.status == DENIED:
             return (f"Camera access was denied for {app}. Turn it on in {settings}, then quit "
                     f"and reopen {app} and run the command again.")
@@ -48,9 +49,16 @@ class CameraAccess:
             return ("Camera access is restricted on this Mac (e.g. by Screen Time or a device "
                     "management profile) and cannot be enabled from here.")
         if self.status == NOT_DETERMINED and self.prompt_refused:
-            return (f"macOS will not show a camera permission prompt for {app}. Run this "
-                    "command from the Terminal app (or iTerm) instead, where macOS asks once "
-                    f"and you can click Allow; or add {app} in {settings}.")
+            if in_desktop_app:
+                return ("macOS did not ask for camera permission. Turn on Fungus-CV in "
+                        f"{settings} (use + to add it if it is not listed), then restart it.")
+            if app == "Fungus-CV" or "python" in (app or "").lower():
+                where = "the Fungus-CV app"
+            else:
+                where = "the packaged Fungus-CV app or the Terminal app"
+            return (f"macOS will not show a camera permission prompt for {app}. Use {where}, "
+                    f"where macOS asks once and you can click Allow; or add {app} in "
+                    f"{settings}.")
         if self.status == NOT_DETERMINED and not self.requested:
             return (f"Camera permission for {app} hasn't been decided yet. Run `fungus cameras` "
                     "(or `fungus doctor --request-permission`) to ask for it.")
@@ -61,6 +69,11 @@ class CameraAccess:
 
 
 # --- which app does macOS charge the permission to? -----------------------------------------
+
+
+def running_as_app() -> bool:
+    """True inside the packaged Fungus-CV app (PyInstaller)."""
+    return bool(getattr(sys, "frozen", False))
 
 
 def _ps_parent(pid: int) -> tuple[int, str] | None:

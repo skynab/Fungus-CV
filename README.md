@@ -6,6 +6,19 @@ Take time-lapse photos with a webcam, then measure how a spreading region (dye, 
 
 Works on Windows, macOS and Linux (Python 3.10+).
 
+## Desktop app
+
+Fungus-CV has a desktop app with a page for each step: **Experiment** (open or create, key settings) → **Camera** (live preview) → **Capture** (scheduled photos with progress) → **Set up measurement** (click the base, stem path, region or field plots; drag over colours) → **Analyze** (per-frame results with overlays) → **Report** (fits and charts) → **Diagnostics**.
+
+```bash
+pip install -e ".[gui]"
+fungus gui                       # or: fungus gui experiments/dye-test-1
+```
+
+To build a standalone app (`Fungus-CV.app` on macOS, `Fungus-CV.exe` on Windows), see [packaging/README.md](packaging/README.md). **On macOS, the packaged app is the most reliable way to use the camera.** It has its own entry under Privacy & Security → Camera, and macOS asks for permission the first time. When `fungus` runs from a terminal, the permission belongs to that terminal app instead.
+
+The command line below does everything the app does, plus SAM prompting, label editing and model training, which aren't in the app yet.
+
 ## Install
 
 ```bash

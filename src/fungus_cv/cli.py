@@ -80,6 +80,20 @@ def main(
 
 
 @app.command()
+def gui(
+    experiment: Path | None = typer.Argument(None, help="Experiment folder to open."),
+) -> None:
+    """Open the desktop application."""
+    try:
+        from fungus_cv.gui.app import main as gui_main
+    except ImportError as exc:
+        typer.secho(f"The desktop app needs PySide6: pip install -e \".[gui]\" ({exc})",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    raise typer.Exit(gui_main(["fungus-cv"] + ([str(experiment)] if experiment else [])))
+
+
+@app.command()
 def doctor(
     probe: bool = typer.Option(True, help="Try opening cameras (needs camera permission)."),
     request_permission: bool = typer.Option(

@@ -144,6 +144,8 @@ def test_lights_dimming_does_not_change_measurements(experiment, method):
     assert float(rows[3]["light_gain_r"]) == pytest.approx(1 / 0.6, rel=0.05)
     assert "lighting_changed" in rows[3]["flags"]
     assert "lighting_changed" not in rows[2]["flags"]
+    # Dimming is not blur, and marker borders that are always white are not "saturated".
+    assert not any("blurry" in r["flags"] or "saturated" in r["flags"] for r in rows)
 
 
 def test_patch_lighting_requires_patch(experiment):

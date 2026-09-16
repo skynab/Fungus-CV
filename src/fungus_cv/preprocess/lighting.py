@@ -32,6 +32,7 @@ def channel_medians(image: np.ndarray, region: np.ndarray) -> np.ndarray:
 class LightingResult:
     gains: tuple[float, float, float]  # per BGR channel, applied to this frame
     saturated_fraction: float  # of reference-region pixels clipped in any channel
+    saturated_increase: float = 0.0  # compared with the reference frame
 
     @property
     def max_change(self) -> float:
@@ -43,6 +44,8 @@ class LightingNormalizer:
         self.region = region
         self.max_gain = max_gain
         self.ref = channel_medians(reference, region)
+        # White marker borders etc. are clipped in every frame; only an increase matters.
+        self.ref_saturated = float((reference[region] >= SATURATED).any(axis=-1).mean())
         if np.any(self.ref < 5):
             raise ValueError("lighting reference region is almost black in the reference frame")
 
@@ -54,4 +57,5 @@ class LightingNormalizer:
         saturated = float((image[region] >= SATURATED).any(axis=-1).mean())
         corrected = np.clip(image.astype(np.float32) * gains.astype(np.float32), 0, 255)
         return corrected.astype(np.uint8), LightingResult(
-            tuple(round(float(g), 4) for g in gains), round(saturated, 4))
+            tuple(round(float(g), 4) for g in gains), round(saturated, 4),
+            round(max(0.0, saturated - self.ref_saturated), 4))

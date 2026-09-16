@@ -20,3 +20,14 @@ def mean_brightness(image: np.ndarray) -> float:
 def sharpness(image: np.ndarray) -> float:
     """Variance of the Laplacian. Higher is sharper; a sudden drop suggests blur or refocus."""
     return float(cv2.Laplacian(to_gray(image), cv2.CV_64F).var())
+
+
+def contrast_normalized_sharpness(image: np.ndarray) -> float:
+    """Laplacian variance divided by intensity variance.
+
+    Dimming or brightening scales both by the same factor, so this only changes when edges
+    actually get softer (blur, lost focus) - unlike `sharpness`, which drops in dim light.
+    """
+    gray = to_gray(image).astype(np.float64)
+    var = gray.var()
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var() / var) if var > 0 else 0.0

@@ -24,7 +24,7 @@ from fungus_cv.preprocess.align import ECC_POOR, Alignment, align_frame
 from fungus_cv.preprocess.lighting import LightingNormalizer, LightingResult
 from fungus_cv.preprocess.markers import Scale, detect_markers, scale_from_markers
 from fungus_cv.preprocess.rectify import Rectification, fit_rectification
-from fungus_cv.quality import mean_brightness, sharpness
+from fungus_cv.quality import contrast_normalized_sharpness, mean_brightness, sharpness
 from fungus_cv.segment.base import build_segmenter, is_sequence_segmenter
 from fungus_cv.storage import Experiment, iso_utc, utc_now
 
@@ -212,7 +212,7 @@ class Analyzer:
             self.lighting = self._build_lighting()
 
         self.ref_brightness = mean_brightness(self.raw_reference)
-        self.ref_sharpness = sharpness(self.raw_reference)
+        self.ref_sharpness = contrast_normalized_sharpness(self.raw_reference)
         if not with_segmenter:  # e.g. the prompt tool only needs aligned frames
             return
         measure = self.cfg.measure
@@ -465,13 +465,14 @@ class Analyzer:
         sharp = sharpness(image)
         if self.ref_brightness > 0 and abs(brightness / self.ref_brightness - 1) > 0.2:
             flags.append("brightness_changed")
-        if self.ref_sharpness > 0 and sharp < 0.5 * self.ref_sharpness:
+        if self.ref_sharpness > 0 and \
+                contrast_normalized_sharpness(image) < 0.5 * self.ref_sharpness:
             flags.append("blurry")
         light = prepared.lighting
         if light is not None:
             if light.max_change > self.cfg.lighting.flag_change:
                 flags.append("lighting_changed")
-            if light.saturated_fraction > 0.02:
+            if light.saturated_increase > 0.02:
                 flags.append("saturated")
         info = {
             "align_method": alignment.method,

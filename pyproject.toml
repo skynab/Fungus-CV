@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fungus-cv"
+version = "0.1.0"
+description = "Time-lapse capture and computer-vision measurement of spreading growth (dye, moss, infection)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "opencv-python>=4.9",
+    "numpy>=1.26",
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "pillow>=10.0",
+    "tzdata; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.scripts]
+fungus = "fungus_cv.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fungus_cv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "B008",  # typer uses function calls in argument defaults
+    "B905",  # zip(a, a[1:]) pairwise idiom
+]

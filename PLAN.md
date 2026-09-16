@@ -11,17 +11,26 @@ Time-lapse capture plus computer-vision measurement of how far a "spreading" reg
 | Test 1 | Paper towel dipped in blue dye | Blue wet area | Towel strip and waterline | Height of the wet front (mm) over time |
 | Target A | Potted plant | Moss on the stem | Stem, from soil line to tip | Height reached on the stem (mm and % of stem) |
 | Target B | Field or plot | Moss patch | Plot boundary or markers | Covered area (cm² and %) and how far the edge has advanced |
+| Target C | Whole field | Color change across the field | Field boundary or markers | Color change per area over time (e.g. share of the field that is discolored) |
 
 Other requirements:
 - Runs on **Windows and macOS**, and Linux if possible.
 - Capture can run unattended for days or weeks.
 - Analysis works on **any folder of images**, so photos from a phone, trail camera or Raspberry Pi can be used as well as a webcam. This matters for field use.
 
+### Decisions so far (2026-09-16)
+- **Intervals:** seconds to minutes while testing with dye; hours between photos for real runs.
+- **Hardware:** a webcam for now. Field hardware is still undecided, so importing existing photos stays supported.
+- **Compute:** a modest GPU. Images are processed **as they arrive** (incremental), so slow models are fine.
+- **Precision:** results are for a research paper. Calibration (markers, locked camera settings) is required, and every result needs an uncertainty estimate and a record of how it was produced.
+- **Plant metrics:** both height reached and % of stem covered.
+- **Adaptable detection:** being able to **train the program with labeled examples** for each new use case is a core feature, not a fallback. The custom-model milestone moves earlier, and the segmentation interface is designed around pluggable trained models.
+
 ---
 
 ## 2. Technology choices
 
-**Language: Python 3.11+.** It is the only language where OpenCV, PyTorch, Segment Anything and the plotting and data tools all work well together. All of them run on Windows, macOS and Linux.
+**Language: Python 3.10+.** It is the only language where OpenCV, PyTorch, Segment Anything and the plotting and data tools all work well together. All of them run on Windows, macOS and Linux.
 
 | Concern | Choice | Notes |
 |---|---|---|
@@ -133,14 +142,14 @@ Moss and dye spread gradually, so the timeline is used as a check: flag any fram
 
 | # | Milestone | Done when |
 |---|---|---|
-| M0 | Project skeleton: `uv`, CLI, config, CI running tests on Win/macOS/Linux (GitHub Actions) | `fungus --help` works on all 3 OSes |
-| M1 | **Capture**: camera list, interval capture with locked settings, metadata, reconnect, import command | An 8-hour unattended run on Windows and macOS with no missed frames |
+| M0 ✅ | Project skeleton: packaging, CLI, config, CI running tests on Win/macOS/Linux (GitHub Actions) | `fungus --help` works on all 3 OSes |
+| M1 🟡 | **Capture**: camera list, interval capture with locked settings, metadata, reconnect, import command | An 8-hour unattended run on Windows and macOS with no missed frames *(code done; hardware test still needed)* |
 | M2 | **Dye test, simple version**: HSV threshold + ArUco scale + extent along the towel axis + CSV and plot | Measured height matches a ruler to within ~2 mm; the √t fit looks reasonable |
 | M3 | **SAM 2 integration**: annotate tool, video propagation, device auto-detection, `Segmenter` interface | SAM 2 dye masks agree with the threshold masks (IoU > 0.9) |
 | M4 | **Robustness**: registration, lighting check, bad-frame skipping, jump detection, overlay video | Bumping the camera or turning a lamp on mid-run does not create fake growth |
 | M5 | **Moss on a plant**: stem skeleton axis, soil-line base, % of stem, logistic fit | Matches hand measurements on ~20 hand-labeled frames |
 | M6 | **Field mode**: 4-marker top-down view, coverage and edge advance, multiple plots per image | Area error < ~10% against hand-drawn outlines |
-| M7 (as needed) | Custom fine-tuned model from corrected SAM masks; optional Streamlit dashboard | Better accuracy than SAM alone on held-out moss frames |
+| M7 (core, can be started after M3) | **Trainable detectors:** a labeling workflow (start from SAM masks, correct them by hand), fine-tune a small segmentation model for each use case, keep versioned models; optional Streamlit dashboard | Beats SAM alone on held-out moss frames; a new use case can be trained from a set of labeled images |
 
 ---
 

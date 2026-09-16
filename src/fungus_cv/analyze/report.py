@@ -1,0 +1,225 @@
+"""Plots, model fits and a time-lapse video from ``results/measurements.csv``."""
+
+from __future__ import annotations
+
+import csv
+import json
+import logging
+import math
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from fungus_cv.analyze.fit import FitResult, fit_all
+from fungus_cv.analyze.pipeline import MEASUREMENTS_NAME, RESULTS_DIR
+from fungus_cv.storage import Experiment, iso_utc, parse_iso_utc
+
+log = logging.getLogger(__name__)
+
+TIME_UNITS = {"s": 1.0, "min": 60.0, "h": 3600.0, "d": 86400.0}
+DEFAULT_EXCLUDE = ("align_failed", "blurry")
+
+# Reference palette (light mode): neutral ink for data, fixed categorical order for fits.
+INK = "#0b0b0b"
+INK_2 = "#52514e"
+GRID = "#e4e3df"
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
+
+
+@dataclass
+class ReportResult:
+    metric: str
+    time_unit: str
+    t0_utc: str
+    n_used: int
+    n_excluded: int
+    retreats: int
+    fits: list[FitResult] = field(default_factory=list)
+    files: list[str] = field(default_factory=list)
+
+
+def load_measurements(experiment: Experiment) -> list[dict]:
+    path = experiment.root / RESULTS_DIR / MEASUREMENTS_NAME
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found; run `fungus analyze` first")
+    with open(path, newline="", encoding="utf-8") as f:
+        return sorted(csv.DictReader(f), key=lambda r: r["timestamp_utc"])
+
+
+def pick_time_unit(span_seconds: float) -> str:
+    if span_seconds < 2 * 3600:
+        return "min"
+    if span_seconds < 3 * 86400:
+        return "h"
+    return "d"
+
+
+def _float(value: str) -> float:
+    return float(value) if value not in ("", None) else math.nan
+
+
+def count_retreats(y: np.ndarray, unc: np.ndarray) -> np.ndarray:
+    """Frames where the front moved back by more than 3 standard uncertainties.
+
+    Dye and infections should only advance; a retreat usually means a segmentation or
+    lighting problem in that frame.
+    """
+    running = np.maximum.accumulate(np.nan_to_num(y, nan=-np.inf))
+    tol = 3 * np.nan_to_num(unc, nan=0.0)
+    return (running - y) > np.maximum(tol, 1e-9)
+
+
+def make_report(
+    experiment: Experiment,
+    metric: str | None = None,
+    t0: datetime | None = None,
+    time_unit: str = "auto",
+    exclude_flags: tuple[str, ...] = DEFAULT_EXCLUDE,
+    models: tuple[str, ...] = ("linear", "sqrt", "power", "logistic"),
+    video: bool = False,
+    fps: int = 10,
+) -> ReportResult:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rows = load_measurements(experiment)
+    if not rows:
+        raise ValueError("measurements.csv is empty")
+    if metric is None:
+        metric = "extent_mm" if rows[0]["extent_mm"] != "" else "extent_px"
+    if metric not in rows[0]:
+        raise ValueError(f"unknown metric {metric!r}; columns: {list(rows[0])}")
+
+    times = np.array([parse_iso_utc(r["timestamp_utc"]).timestamp() for r in rows])
+    t0_ts = t0.timestamp() if t0 else times[0]
+    if time_unit == "auto":
+        time_unit = pick_time_unit(times[-1] - t0_ts)
+    t = (times - t0_ts) / TIME_UNITS[time_unit]
+    y = np.array([_float(r[metric]) for r in rows])
+    unc = np.array([_float(r["extent_mm_unc"]) for r in rows]) if metric == "extent_mm" \
+        else np.full(len(rows), math.nan)
+
+    flags = [set(filter(None, r["flags"].split(";"))) for r in rows]
+    excluded = np.array([bool(f & set(exclude_flags)) for f in flags]) | np.isnan(y) | (t < 0)
+    retreat = count_retreats(np.where(excluded, np.nan, y), unc) & ~excluded
+    use = ~excluded
+
+    sigma = unc[use] if np.all(np.isfinite(unc[use])) and np.all(unc[use] > 0) else None
+    fits = fit_all(t[use], y[use], models=models, sigma=sigma)
+
+    out_dir = experiment.root / RESULTS_DIR / "report"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result = ReportResult(
+        metric=metric, time_unit=time_unit,
+        t0_utc=iso_utc(datetime.fromtimestamp(t0_ts, timezone.utc)),
+        n_used=int(use.sum()), n_excluded=int(excluded.sum()),
+        retreats=int(retreat.sum()), fits=fits,
+    )
+
+    # --- main plot: metric over time with fits ---------------------------------------
+    label = {"extent_mm": "Extent (mm)", "extent_px": "Extent (px)",
+             "coverage_pct": "Coverage (%)", "extent_fraction": "Extent (fraction of axis)",
+             "target_area_mm2": "Area (mm²)"}.get(metric, metric)
+    fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
+    _style(ax)
+    if np.isfinite(unc[use]).any():
+        ax.errorbar(t[use], y[use], yerr=unc[use], fmt="o", ms=4, color=INK_2, ecolor=GRID,
+                    elinewidth=1, capsize=0, label="measured", zorder=3)
+    else:
+        ax.plot(t[use], y[use], "o", ms=4, color=INK_2, label="measured", zorder=3)
+    if excluded.any():
+        ax.plot(t[excluded], y[excluded], "x", ms=6, color=INK_2, alpha=0.6,
+                label="excluded (flagged)", zorder=3)
+    if retreat.any():
+        ax.plot(t[retreat], y[retreat], "o", ms=9, mfc="none", mec=INK, mew=1.2,
+                label="retreat > 3σ (check frame)", zorder=4)
+
+    if use.sum() > 1:
+        grid = np.linspace(max(0.0, t[use].min()), t[use].max(), 300)
+        for i, (color, fit) in enumerate(zip(SERIES, fits)):
+            if fit.ok:
+                # Later models are dashed and drawn on top, so identical fits stay visible.
+                ax.plot(grid, fit.predict(grid), color=color, lw=2,
+                        ls=(0, (6, 3)) if i % 2 else "-", zorder=2.5 if i % 2 else 2,
+                        label=f"{fit.model}  R² {fit.r2:.4f}")
+    ax.set_xlabel(f"Time since start ({time_unit})", color=INK)
+    ax.set_ylabel(label, color=INK)
+    ax.set_title(f"{experiment.config.name}: {label.lower()} over time", color=INK,
+                 loc="left", fontsize=12)
+    ax.legend(frameon=False, fontsize=9, labelcolor=INK)
+    fig.tight_layout()
+    main_png = out_dir / f"{metric}_vs_time.png"
+    fig.savefig(main_png)
+    plt.close(fig)
+    result.files.append(main_png)
+
+    # --- quality control: one measure per panel, shared time axis --------------------
+    qc = [("mean_brightness", "Brightness (0-255)"), ("align_shift_px", "Alignment shift (px)"),
+          ("align_rms_px", "Alignment residual (px)"), ("coverage_pct", "Coverage (%)")]
+    fig, axes = plt.subplots(len(qc), 1, figsize=(8, 8), dpi=150, sharex=True)
+    for ax, (col, title) in zip(axes, qc):
+        _style(ax)
+        values = np.array([_float(r[col]) for r in rows])
+        ax.plot(t, values, color=SERIES[0], lw=2)
+        ax.set_ylabel(title, color=INK, fontsize=9)
+    axes[-1].set_xlabel(f"Time since start ({time_unit})", color=INK)
+    axes[0].set_title("Quality checks", color=INK, loc="left", fontsize=12)
+    fig.tight_layout()
+    qc_png = out_dir / "quality_checks.png"
+    fig.savefig(qc_png)
+    plt.close(fig)
+    result.files.append(qc_png)
+
+    summary = {
+        "metric": metric, "time_unit": time_unit, "t0": result.t0_utc,
+        "n_used": result.n_used, "n_excluded": result.n_excluded,
+        "excluded_flags": list(exclude_flags), "retreats": result.retreats,
+        "weighted_by_uncertainty": sigma is not None,
+        "fits": [f.to_dict() for f in fits],
+    }
+    fits_json = out_dir / "fits.json"
+    fits_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    result.files.append(fits_json)
+
+    if video:
+        mp4 = out_dir / "overlay_timelapse.mp4"
+        if write_video([experiment.root / r["overlay_file"] for r in rows if r["overlay_file"]],
+                       mp4, fps):
+            result.files.append(mp4)
+    return result
+
+
+def _style(ax) -> None:
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(GRID)
+    ax.tick_params(colors=INK_2, labelsize=9)
+    ax.grid(True, color=GRID, lw=0.8)
+    ax.set_axisbelow(True)
+
+
+def write_video(frames: list[Path], path: Path, fps: int = 10) -> bool:
+    frames = [p for p in frames if p.exists()]
+    if not frames:
+        log.warning("no overlay images to make a video from")
+        return False
+    first = cv2.imread(str(frames[0]))
+    h, w = first.shape[:2]
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    if not writer.isOpened():
+        log.warning("could not open a video writer for %s", path)
+        return False
+    for p in frames:
+        img = cv2.imread(str(p))
+        if img is not None:
+            if img.shape[:2] != (h, w):
+                img = cv2.resize(img, (w, h))
+            writer.write(img)
+    writer.release()
+    return True

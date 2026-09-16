@@ -113,6 +113,57 @@ class CaptureConfig(BaseModel):
         return self.interval <= 120
 
 
+class HsvRange(BaseModel):
+    """Inclusive OpenCV HSV bounds: H 0-179, S 0-255, V 0-255."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lower: tuple[int, int, int]
+    upper: tuple[int, int, int]
+
+    @model_validator(mode="after")
+    def _check(self) -> HsvRange:
+        for lo, hi, top in zip(self.lower, self.upper, (179, 255, 255)):
+            if not (0 <= lo <= hi <= top):
+                raise ValueError(f"invalid HSV range {self.lower} - {self.upper}")
+        return self
+
+
+class ColorTargetConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["color"] = "color"
+    # Default: blue dye. Use `fungus pick-color` to measure ranges from your own images.
+    hsv_ranges: list[HsvRange] = Field(
+        default_factory=lambda: [HsvRange(lower=(95, 60, 30), upper=(135, 255, 255))]
+    )
+    open_px: int = Field(3, ge=0)  # removes specks smaller than this
+    close_px: int = Field(7, ge=0)  # fills small holes and gaps
+    min_blob_area_px: int = Field(50, ge=0)
+
+
+class MarkerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dictionary: str = "DICT_4X4_50"
+    # Edge length of the black marker square as printed, in mm. Measure the print with a
+    # ruler. Required for mm results; without it results are in pixels only.
+    size_mm: float | None = Field(None, gt=0)
+
+
+class AnalysisConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    camera: str | None = None  # default: the camera with the most frames
+    align: Literal["markers_or_ecc", "markers", "ecc", "none"] = "markers_or_ecc"
+    markers: MarkerConfig = Field(default_factory=MarkerConfig)
+    target: ColorTargetConfig = Field(default_factory=ColorTargetConfig)
+    # Front position across the object's width: 50 = median front, 100 = highest point.
+    front_percentile: float = Field(50.0, ge=0, le=100)
+    save_masks: bool = True
+    save_overlays: bool = True
+
+
 class ExperimentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -120,6 +171,7 @@ class ExperimentConfig(BaseModel):
     description: str = ""
     cameras: list[CameraConfig] = Field(default_factory=lambda: [CameraConfig()])
     capture: CaptureConfig = Field(default_factory=CaptureConfig)
+    analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
 
     @model_validator(mode="after")
     def _unique_cameras(self) -> ExperimentConfig:
@@ -180,4 +232,50 @@ capture:
   retry_delay: 2.0
   min_free_disk_mb: 500
   keep_awake: true        # stop the computer sleeping while capturing
+
+analysis:
+  camera: null            # which camera's frames to analyze; null = the one with most frames
+  align: markers_or_ecc   # line frames up with the first: markers_or_ecc | markers | ecc | none
+  markers:
+    dictionary: DICT_4X4_50   # must match the printed sheet (`fungus markers`)
+    size_mm: null         # black square edge as printed, measured with a ruler, e.g. 30.0
+  target:
+    method: color
+    hsv_ranges:           # OpenCV HSV (H 0-179). Measure yours with `fungus pick-color`
+      - lower: [95, 60, 30]
+        upper: [135, 255, 255]
+    open_px: 3            # remove specks
+    close_px: 7           # fill small holes
+    min_blob_area_px: 50
+  front_percentile: 50    # front across the width: 50 = median, 100 = highest point
+  save_masks: true
+  save_overlays: true
 """
+
+
+def replace_hsv_ranges_in_yaml(text: str, ranges) -> str:
+    """Swap the ``hsv_ranges:`` block in config text, keeping all other lines and comments."""
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        match = re.match(r"^(\s*)hsv_ranges:", line)
+        if not match:
+            continue
+        indent = len(match.group(1))
+        end = i + 1
+        while end < len(lines):
+            stripped = lines[end].strip()
+            current = len(lines[end]) - len(lines[end].lstrip())
+            if stripped and not stripped.startswith("#") and current <= indent:
+                break
+            if stripped.startswith("#") and current <= indent:
+                break
+            end += 1
+        pad = " " * (indent + 2)
+        block = [f"{' ' * indent}hsv_ranges:\n"]
+        for lower, upper in ranges:
+            block.append(f"{pad}- lower: [{', '.join(map(str, lower))}]\n")
+            block.append(f"{pad}  upper: [{', '.join(map(str, upper))}]\n")
+        new_text = "".join(lines[:i] + block + lines[end:])
+        yaml.safe_load(new_text)  # never write a config that no longer parses
+        return new_text
+    raise ValueError("no hsv_ranges: entry found in config")

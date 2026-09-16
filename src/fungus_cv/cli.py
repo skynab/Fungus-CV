@@ -275,5 +275,191 @@ def status(experiment: Path = typer.Argument(..., help="Experiment folder.")) ->
     typer.echo(f"\nDisk: {size_mb:.1f} MB used, {exp.free_disk_mb() / 1e3:.1f} GB free")
 
 
+
+# --- analysis -------------------------------------------------------------------------
+
+
+def _reference_image(exp):
+    from fungus_cv.analyze.pipeline import AnalysisError, frames_for_analysis, read_image
+
+    try:
+        row = frames_for_analysis(exp)[0]
+        return row, read_image(exp, row["file"])
+    except AnalysisError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+
+
+@app.command()
+def markers(
+    output: Path = typer.Argument(Path("markers.png"), help="Image file to write (PNG or PDF)."),
+    ids: str = typer.Option("0,1,2,3", help="Comma-separated marker ids."),
+    size_mm: float = typer.Option(30.0, help="Marker edge length in mm."),
+    dictionary: str = typer.Option("DICT_4X4_50"),
+    page: str = typer.Option("letter", help="letter | a4"),
+    dpi: int = typer.Option(300),
+) -> None:
+    """Make a printable sheet of ArUco markers for scale and alignment."""
+    import cv2
+
+    from fungus_cv.preprocess.markers import marker_sheet
+
+    try:
+        sheet = marker_sheet([int(i) for i in ids.split(",")], size_mm, dictionary, page, dpi)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from exc
+    if output.suffix.lower() == ".pdf":
+        from PIL import Image
+
+        Image.fromarray(sheet).save(output, resolution=dpi)
+    else:
+        cv2.imwrite(str(output), sheet)
+    typer.echo(f"Wrote {output}")
+    typer.echo(
+        "Print at 100% / actual size, check the 100 mm ruler, measure a marker's black square "
+        "and put that value in analysis.markers.size_mm. Place markers in the same plane as "
+        "the object, and keep them in view for the whole experiment."
+    )
+
+
+@app.command()
+def annotate(experiment: Path = typer.Argument(..., help="Experiment folder.")) -> None:
+    """Click the base, tip and region to measure on the reference (first) frame."""
+    from fungus_cv.analyze.pipeline import annotations_path
+    from fungus_cv.ui.interactive import Cancelled
+    from fungus_cv.ui.interactive import annotate as run_annotate
+
+    exp = _load_experiment(experiment)
+    row, image = _reference_image(exp)
+    try:
+        ann = run_annotate(image, reference_file=row["file"])
+    except Cancelled:
+        typer.echo("Cancelled; nothing saved.")
+        raise typer.Exit(1) from None
+    path = annotations_path(exp)
+    ann.save(path)
+    typer.echo(f"Saved {path} (axis length {ann.axis_length_px:.1f} px)")
+
+
+@app.command("pick-color")
+def pick_color(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    frame: Path | None = typer.Option(
+        None, help="Image to sample from (default: the last frame, where the target is largest)."
+    ),
+    write: bool = typer.Option(True, help="Write the ranges into config.yaml."),
+) -> None:
+    """Measure the target's color by dragging boxes over it, then save the HSV ranges."""
+    import cv2
+
+    from fungus_cv.analyze.pipeline import frames_for_analysis, read_image
+    from fungus_cv.config import replace_hsv_ranges_in_yaml
+    from fungus_cv.ui.interactive import Cancelled
+    from fungus_cv.ui.interactive import pick_color as run_pick
+
+    exp = _load_experiment(experiment)
+    if frame is not None:
+        image = cv2.imread(str(frame))
+        if image is None:
+            typer.secho(f"cannot read {frame}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
+    else:
+        _reference_image(exp)  # validates that frames exist
+        image = read_image(exp, frames_for_analysis(exp)[-1]["file"])
+    try:
+        ranges = run_pick(image)
+    except Cancelled:
+        typer.echo("Cancelled; nothing saved.")
+        raise typer.Exit(1) from None
+
+    snippet = "\n".join(f"  - lower: {list(lo)}\n    upper: {list(hi)}" for lo, hi in ranges)
+    if write:
+        text = exp.config_path.read_text(encoding="utf-8")
+        exp.config_path.write_text(replace_hsv_ranges_in_yaml(text, ranges), encoding="utf-8")
+        typer.echo(f"Updated hsv_ranges in {exp.config_path}:\n{snippet}")
+    else:
+        typer.echo(f"hsv_ranges:\n{snippet}")
+
+
+@app.command()
+def analyze(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    force: bool = typer.Option(False, help="Re-measure every frame."),
+    watch: bool = typer.Option(False, help="Keep running and measure new frames as they arrive."),
+    poll: str = typer.Option("30s", help="How often to check for new frames with --watch."),
+) -> None:
+    """Align, segment and measure every frame; results go to results/measurements.csv."""
+    from fungus_cv.analyze.pipeline import AnalysisError
+    from fungus_cv.analyze.pipeline import analyze as run_analyze
+    from fungus_cv.analyze.pipeline import watch as run_watch
+
+    exp = _load_experiment(experiment)
+    _setup_logging()
+
+    def show(summary) -> None:
+        flagged = ", ".join(f"{k}: {v}" for k, v in summary.flagged.items()) or "none"
+        typer.echo(
+            f"measured {summary.processed}, already done {summary.skipped_existing}, "
+            f"failed {summary.failed}; flags: {flagged} (settings {summary.settings_hash})"
+        )
+
+    if watch:
+        typer.echo("Watching for new frames; Ctrl+C to stop.")
+        try:
+            run_watch(exp.root, parse_duration(poll), on_summary=show)
+        except KeyboardInterrupt:
+            pass
+        return
+    try:
+        show(run_analyze(exp, force=force))
+    except AnalysisError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+
+
+@app.command()
+def report(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    metric: str | None = typer.Option(
+        None, help="Column to plot: extent_mm (default), extent_px, coverage_pct, ..."
+    ),
+    t0: datetime | None = typer.Option(
+        None, help="Start time for t = 0, e.g. when the towel touched the dye (local time)."
+    ),
+    time_unit: str = typer.Option("auto", help="auto | s | min | h | d"),
+    include_flagged: bool = typer.Option(False, help="Fit flagged frames too."),
+    video: bool = typer.Option(False, help="Also write an overlay time-lapse video."),
+) -> None:
+    """Fit growth models and write plots to results/report/."""
+    from fungus_cv.analyze.report import DEFAULT_EXCLUDE, make_report
+
+    exp = _load_experiment(experiment)
+    _setup_logging()
+    if t0 is not None and t0.tzinfo is None:
+        t0 = t0.astimezone()
+    try:
+        result = make_report(
+            exp, metric=metric, t0=t0, time_unit=time_unit,
+            exclude_flags=() if include_flagged else DEFAULT_EXCLUDE, video=video,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"{result.metric}: {result.n_used} frames used, {result.n_excluded} excluded, "
+               f"{result.retreats} retreat(s) to check; time in {result.time_unit}")
+    ok = [f for f in result.fits if f.ok]
+    best_aic = min((f.aic for f in ok), default=None)
+    for fit in result.fits:
+        if not fit.ok:
+            typer.echo(f"  {fit.model:9s} failed: {fit.message}")
+            continue
+        params = ", ".join(f"{k}={v:.4g}±{fit.stderr[k]:.2g}" for k, v in fit.params.items())
+        best = "  <- lowest AIC" if fit.aic == best_aic else ""
+        typer.echo(f"  {fit.model:9s} {params}  R²={fit.r2:.4f}  AIC={fit.aic:.1f}{best}")
+    for f in result.files:
+        typer.echo(f"wrote {f}")
+
 if __name__ == "__main__":
     app()

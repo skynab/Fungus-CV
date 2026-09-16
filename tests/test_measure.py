@@ -144,10 +144,10 @@ def test_replace_hsv_ranges_keeps_comments(experiment):
     text = experiment.config_path.read_text()
     new = replace_hsv_ranges_in_yaml(text, [((1, 2, 3), (4, 5, 6)), ((170, 2, 3), (179, 5, 6))])
     data = yaml.safe_load(new)
-    assert data["analysis"]["target"]["hsv_ranges"] == [
+    assert data["analysis"]["target"]["color"]["hsv_ranges"] == [
         {"lower": [1, 2, 3], "upper": [4, 5, 6]}, {"lower": [170, 2, 3], "upper": [179, 5, 6]},
     ]
-    assert data["analysis"]["target"]["open_px"] == 3
+    assert data["analysis"]["target"]["color"]["open_px"] == 3
     assert "# remove specks" in new
     Experiment(experiment.root)  # still a valid config
 

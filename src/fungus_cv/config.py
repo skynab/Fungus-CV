@@ -132,7 +132,6 @@ class HsvRange(BaseModel):
 class ColorTargetConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    method: Literal["color"] = "color"
     # Default: blue dye. Use `fungus pick-color` to measure ranges from your own images.
     hsv_ranges: list[HsvRange] = Field(
         default_factory=lambda: [HsvRange(lower=(95, 60, 30), upper=(135, 255, 255))]
@@ -140,6 +139,33 @@ class ColorTargetConfig(BaseModel):
     open_px: int = Field(3, ge=0)  # removes specks smaller than this
     close_px: int = Field(7, ge=0)  # fills small holes and gaps
     min_blob_area_px: int = Field(50, ge=0)
+
+
+class Sam2TargetConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = "facebook/sam2.1-hiera-small"
+    device: Literal["auto", "cuda", "mps", "cpu"] = "auto"
+    prompts_file: str = "prompts.json"
+    # SAM works at ~1024 px. Cropping to the annotated region first gives it more pixels
+    # on the object, so mask edges are more precise.
+    crop_to_roi: bool = True
+    crop_margin_px: int = Field(32, ge=0)
+    mask_threshold: float = 0.0  # on SAM's logits; >0 = tighter masks, <0 = looser
+    min_blob_area_px: int = Field(0, ge=0)
+
+
+class TargetConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["color", "sam2"] = "color"
+    color: ColorTargetConfig = Field(default_factory=ColorTargetConfig)
+    sam2: Sam2TargetConfig = Field(default_factory=Sam2TargetConfig)
+
+    def selected(self) -> dict:
+        """Only the active method's settings; used for the results settings hash."""
+        return {"method": self.method,
+                self.method: getattr(self, self.method).model_dump(mode="json")}
 
 
 class MarkerConfig(BaseModel):
@@ -157,7 +183,7 @@ class AnalysisConfig(BaseModel):
     camera: str | None = None  # default: the camera with the most frames
     align: Literal["markers_or_ecc", "markers", "ecc", "none"] = "markers_or_ecc"
     markers: MarkerConfig = Field(default_factory=MarkerConfig)
-    target: ColorTargetConfig = Field(default_factory=ColorTargetConfig)
+    target: TargetConfig = Field(default_factory=TargetConfig)
     # Front position across the object's width: 50 = median front, 100 = highest point.
     front_percentile: float = Field(50.0, ge=0, le=100)
     save_masks: bool = True
@@ -240,13 +266,22 @@ analysis:
     dictionary: DICT_4X4_50   # must match the printed sheet (`fungus markers`)
     size_mm: null         # black square edge as printed, measured with a ruler, e.g. 30.0
   target:
-    method: color
-    hsv_ranges:           # OpenCV HSV (H 0-179). Measure yours with `fungus pick-color`
-      - lower: [95, 60, 30]
-        upper: [135, 255, 255]
-    open_px: 3            # remove specks
-    close_px: 7           # fill small holes
-    min_blob_area_px: 50
+    method: color         # color | sam2 (sam2 needs: pip install -e ".[sam]")
+    color:
+      hsv_ranges:         # OpenCV HSV (H 0-179). Measure yours with `fungus pick-color`
+        - lower: [95, 60, 30]
+          upper: [135, 255, 255]
+      open_px: 3          # remove specks
+      close_px: 7         # fill small holes
+      min_blob_area_px: 50
+    sam2:
+      model: facebook/sam2.1-hiera-small  # -tiny | -small | -base-plus | -large (slowest, best)
+      device: auto        # auto | cuda | mps | cpu
+      prompts_file: prompts.json  # created by `fungus prompt`
+      crop_to_roi: true   # give SAM more pixels on the object (more precise edges)
+      crop_margin_px: 32
+      mask_threshold: 0.0 # >0 tighter masks, <0 looser
+      min_blob_area_px: 0
   front_percentile: 50    # front across the width: 50 = median, 100 = highest point
   save_masks: true
   save_overlays: true

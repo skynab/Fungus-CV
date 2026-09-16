@@ -461,5 +461,112 @@ def report(
     for f in result.files:
         typer.echo(f"wrote {f}")
 
+
+def _pick_frame_index(frames: list[dict], frame: str) -> int:
+    if frame in ("last", "first"):
+        return len(frames) - 1 if frame == "last" else 0
+    if frame.lstrip("-").isdigit():
+        return int(frame) % len(frames)
+    for i, row in enumerate(frames):
+        if Path(row["file"]).name == Path(frame).name:
+            return i
+    raise typer.BadParameter(f"frame {frame!r} not found (use first, last, an index or a file)")
+
+
+@app.command()
+def prompt(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    frame: str = typer.Option(
+        "last", help="Frame to click on: last (default), first, an index, or a file name. "
+        "Pick one where the target is clearly visible."
+    ),
+    preview: bool = typer.Option(True, help="Show the SAM mask live while clicking."),
+) -> None:
+    """Click on the target for SAM 2 (left = target, right = not target)."""
+    from fungus_cv.analyze.pipeline import AnalysisError, Analyzer
+    from fungus_cv.segment.prompts import Prompts
+    from fungus_cv.segment.sam2 import Sam2VideoSegmenter, _RoiCrop
+    from fungus_cv.ui.interactive import Cancelled, prompt_target
+
+    exp = _load_experiment(experiment)
+    _setup_logging()
+    try:
+        analyzer = Analyzer(exp, with_segmenter=False)
+    except AnalysisError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    index = _pick_frame_index(analyzer.frames, frame)
+    frame_file = analyzer.frames[index]["file"]
+    image = analyzer.aligned_frame(index)
+
+    cfg = exp.config.analysis.target.sam2
+    path = exp.root / cfg.prompts_file
+    prompts = Prompts.load(path) if path.exists() else Prompts()
+    preview_fn = None
+    if preview:
+        seg = Sam2VideoSegmenter(
+            model_name=cfg.model, prompts=Prompts(), device=cfg.device,
+            crop=_RoiCrop(analyzer.annotations.roi, cfg.crop_margin_px) if cfg.crop_to_roi
+            else None,
+            mask_threshold=cfg.mask_threshold, min_blob_area_px=cfg.min_blob_area_px,
+        )
+        preview_fn = seg.segment_single
+    try:
+        result = prompt_target(image, frame_file, preview_fn, prompts.for_file(frame_file))
+    except Cancelled:
+        typer.echo("Cancelled; nothing saved.")
+        raise typer.Exit(1) from None
+    prompts.set(result)
+    prompts.save(path)
+    typer.echo(f"Saved prompt for {frame_file} to {path} ({len(prompts.frames)} prompted frame(s))")
+    if exp.config.analysis.target.method != "sam2":
+        typer.echo("Note: set analysis.target.method: sam2 in config.yaml to use these prompts.")
+
+
+@app.command()
+def runs(experiment: Path = typer.Argument(..., help="Experiment folder.")) -> None:
+    """List analysis runs whose masks are on disk (for `fungus compare`)."""
+    from fungus_cv.analyze.compare import list_runs
+
+    exp = _load_experiment(experiment)
+    found = list_runs(exp)
+    if not found:
+        typer.echo("No runs yet; run `fungus analyze`.")
+        return
+    for r in found:
+        typer.echo(f"{r.run_id}  {r.method:6s}  {r.n_masks:5d} masks  {r.updated_utc}")
+
+
+@app.command()
+def compare(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    run_a: str | None = typer.Argument(None, help="Run id/prefix or folder of masks. "
+                                       "Default: second newest run."),
+    run_b: str | None = typer.Argument(None, help="Default: newest run."),
+) -> None:
+    """Compare two runs' masks per frame: IoU and extent difference."""
+    from fungus_cv.analyze.compare import compare_runs, list_runs
+
+    exp = _load_experiment(experiment)
+    if run_a is None or run_b is None:
+        found = list_runs(exp)
+        if len(found) < 2:
+            typer.secho("need two runs; analyze with two different settings first",
+                        fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
+        run_a = run_a or found[-2].run_id
+        run_b = run_b or found[-1].run_id
+    try:
+        r = compare_runs(exp, run_a, run_b)
+    except (ValueError, FileNotFoundError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{r.run_a} vs {r.run_b}: {r.n_frames} frames")
+    typer.echo(f"  IoU  mean {r.iou_mean:.4f}  median {r.iou_median:.4f}  "
+               f"min {r.iou_min:.4f} ({r.worst_frame})")
+    typer.echo(f"  extent difference (b - a): mean {r.extent_diff_mean:+.3f} "
+               f"sd {r.extent_diff_sd:.3f} {r.extent_unit}")
+    typer.echo(f"wrote {r.csv_path}")
+
 if __name__ == "__main__":
     app()

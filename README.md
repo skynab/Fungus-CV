@@ -2,7 +2,7 @@
 
 Take time-lapse photos with a webcam, then measure how a spreading region (dye, moss, an infection) moves relative to a reference object over time. See [PLAN.md](PLAN.md) for the full roadmap.
 
-**Status:** capture works (M1), and measuring with a color threshold works (M2). SAM and trainable models come next.
+**Status:** capture (M1), color-threshold measurement (M2) and SAM 2 segmentation (M3) all work. Trainable per-use-case models (M7) come next.
 
 Works on Windows, macOS and Linux (Python 3.10+).
 
@@ -85,6 +85,33 @@ It outputs parameters ± standard errors, R², and AIC (lower AIC = better model
 - Set `--t0` to the moment the towel touched the dye. Otherwise t = 0 is the first photo.
 - The dye-edge position depends on the color thresholds. To estimate that uncertainty, re-run with slightly wider and narrower `hsv_ranges` and compare. Archived results make this easy.
 
+## Segmenting with SAM 2 (for targets a color threshold can't separate)
+
+Color thresholds work well for dye. Moss on bark or soil usually needs a model. SAM 2 finds the target from a few clicks, then **tracks it through the whole time-lapse**.
+
+```bash
+pip install -e ".[sam]"      # PyTorch + transformers. NVIDIA GPU: install the CUDA build of torch first
+fungus prompt experiments/moss-1 --frame last   # click on the target; the mask previews live
+# set analysis.target.method: sam2 in config.yaml
+fungus analyze experiments/moss-1
+fungus runs experiments/moss-1       # every run, color or sam2, with its masks
+fungus compare experiments/moss-1    # IoU and extent difference between the two newest runs
+```
+
+- **Prompting:**
+  - Left-click the target and right-click things that look similar but aren't.
+  - `b` draws a box around the target instead of clicking.
+  - Pick a frame where the target is clearly visible; the last frame is the default.
+  - If tracking drifts, prompt more frames. Each prompted frame corrects the tracking from that point on.
+- **Tracking:** SAM 2 tracks forward in time from the first prompted frame, and backward for earlier frames, including ones taken before the target appeared. Prompts are stored in `prompts.json`, and editing them starts a new, separately archived run.
+- **Precision:** SAM works internally at about 1024 px, so each frame is first cropped to the annotated region (`crop_to_roi`). On synthetic tests this cut area error from about 190 px to about 3 px.
+- **Models:** `sam2.1-hiera-tiny`, `-small` (default), `-base-plus` and `-large` trade speed for accuracy. Weights download on first use.
+  - The device (CUDA, Apple GPU or CPU) is picked automatically.
+  - On an M1 Pro, `-small` takes about 0.8 s per frame.
+  - New frames re-run tracking from the prompted frame, so each `analyze` gets slower as the run grows (minutes for a few hundred frames).
+- **Validating:** `fungus compare` accepts any folder of mask PNGs, not just runs. Use it to check SAM against hand-labeled frames before trusting it on a new kind of scene. On synthetic dye, SAM 2-small matched the color threshold with mean IoU 0.991 and read the front **0.21 mm lower** on average; check for similar systematic offsets on real images.
+- **Tests:** tests that load the real model run only with `FUNGUS_TEST_SAM=1`.
+
 ## What an experiment folder contains
 
 ```
@@ -94,7 +121,9 @@ experiments/dye-test-1/
   frames.csv      # one row per image or failed attempt (see below)
   capture.log
   annotations.json  # base, tip and region (from `fungus annotate`)
-  results/        # measurements.csv, run_info.json, masks/, overlays/, report/, archive/
+  prompts.json    # SAM clicks (from `fungus prompt`)
+  results/        # measurements.csv, run_info.json, report/, archive/,
+                  # masks/<run>/, overlays/<run>/, runs/<run>.json, compare/
 ```
 
 `frames.csv` columns: `timestamp_utc, camera, status (ok/failed), file, sha256, width, height, source, scheduled_utc, lag_s, mean_brightness, sharpness, camera_settings (JSON), notes`.

@@ -25,7 +25,7 @@ from fungus_cv.measure.geometry import (
 from fungus_cv.preprocess.align import ECC_POOR, align_frame
 from fungus_cv.preprocess.markers import Scale, detect_markers, scale_from_markers
 from fungus_cv.quality import mean_brightness, sharpness
-from fungus_cv.segment import build_segmenter
+from fungus_cv.segment.base import build_segmenter, is_sequence_segmenter
 from fungus_cv.storage import Experiment, iso_utc, utc_now
 
 log = logging.getLogger(__name__)
@@ -96,7 +96,7 @@ def read_image(experiment: Experiment, rel: str) -> np.ndarray:
 
 
 class Analyzer:
-    def __init__(self, experiment: Experiment):
+    def __init__(self, experiment: Experiment, with_segmenter: bool = True):
         self.experiment = experiment
         self.cfg = experiment.config.analysis
         self.results_dir = experiment.root / RESULTS_DIR
@@ -149,19 +149,29 @@ class Analyzer:
         margin = max(15, int(0.02 * max(w, h)))
         self.align_exclude = cv2.dilate(roi, np.ones((margin, margin), np.uint8)).astype(bool)
 
-        self.segmenter = build_segmenter(self.cfg.target)
         self.ref_brightness = mean_brightness(self.reference)
         self.ref_sharpness = sharpness(self.reference)
+        self.frames = frames
+        if not with_segmenter:  # e.g. the prompt tool only needs aligned frames
+            return
+        try:
+            self.segmenter = build_segmenter(self.cfg.target, experiment.root,
+                                             self.annotations.roi)
+        except (ValueError, RuntimeError) as exc:  # missing prompts, missing torch, ...
+            raise AnalysisError(str(exc)) from exc
+        analysis_settings = self.cfg.model_dump(mode="json")
+        analysis_settings["target"] = self.cfg.target.selected()
         self.settings = {
             "fungus_cv_version": __version__,
             "reference_file": self.reference_row["file"],
-            "analysis": self.cfg.model_dump(mode="json"),
+            "analysis": analysis_settings,
             "segmenter": self.segmenter.describe(),
             "annotations": json.loads(ann_path.read_text(encoding="utf-8")),
         }
         blob = json.dumps(self.settings, sort_keys=True).encode()
         self.settings_hash = hashlib.sha256(blob).hexdigest()[:12]
-        self.frames = frames
+        # Masks are kept per settings hash so runs with different methods can be compared.
+        self.masks_dir = self.results_dir / "masks" / self.settings_hash
 
     # --- bookkeeping ---------------------------------------------------------------
 
@@ -200,7 +210,11 @@ class Analyzer:
             "reference_markers": sorted(self.ref_markers),
             "settings": self.settings,
         }
-        (self.results_dir / RUN_INFO_NAME).write_text(json.dumps(info, indent=2), "utf-8")
+        text = json.dumps(info, indent=2)
+        (self.results_dir / RUN_INFO_NAME).write_text(text, "utf-8")
+        runs = self.results_dir / "runs"
+        runs.mkdir(exist_ok=True)
+        (runs / f"{self.settings_hash}.json").write_text(text, "utf-8")
 
     # --- processing ----------------------------------------------------------------
 
@@ -211,33 +225,76 @@ class Analyzer:
         done = self._existing()
         self._write_run_info()
         summary = AnalysisSummary(settings_hash=self.settings_hash)
-        for frame_row in self.frames:
-            if frame_row["file"] in done:
-                summary.skipped_existing += 1
-                continue
-            try:
-                row = self.process(frame_row)
-            except AnalysisError as exc:
-                log.error("%s: %s", frame_row["file"], exc)
-                summary.failed += 1
-                continue
+        pending = [i for i, r in enumerate(self.frames) if r["file"] not in done]
+        summary.skipped_existing = len(self.frames) - len(pending)
+        if not pending:
+            return summary
+
+        if is_sequence_segmenter(self.segmenter):
+            results = self._run_sequence(pending, summary)
+        else:
+            results = self._run_per_frame(pending, summary)
+        for row in results:
             self._append(row)
             summary.processed += 1
             for flag in filter(None, row["flags"].split(";")):
                 summary.flagged[flag] += 1
         return summary
 
-    def process(self, frame_row: dict) -> dict:
-        exp = self.experiment
-        image = read_image(exp, frame_row["file"])
+    def _run_per_frame(self, pending: list[int], summary: AnalysisSummary):
+        for i in pending:
+            frame_row = self.frames[i]
+            try:
+                image, aligned, alignment = self._align(frame_row)
+                mask = self.segmenter.segment(aligned)
+            except AnalysisError as exc:
+                log.error("%s: %s", frame_row["file"], exc)
+                summary.failed += 1
+                continue
+            yield self._measure(frame_row, image, aligned, alignment, mask)
+
+    def _run_sequence(self, pending: list[int], summary: AnalysisSummary):
+        """Memory-based segmenters see frames in order; only ``pending`` rows are written."""
+        needed = set(pending)
+        cache: dict[int, tuple] = {}
+
+        def load(i: int) -> np.ndarray:
+            if i not in cache:
+                prepared = self._align(self.frames[i])
+                if i not in needed:
+                    return prepared[1]
+                cache[i] = prepared
+            return cache[i][1]
+
+        files = [r["file"] for r in self.frames]
+        try:
+            for i, mask in self.segmenter.segment_sequence(files, load, needed):
+                image, aligned, alignment = cache.pop(i) if i in cache else \
+                    self._align(self.frames[i])
+                yield self._measure(self.frames[i], image, aligned, alignment, mask)
+                needed.discard(i)
+                done = len(pending) - len(needed)
+                if done % 10 == 0 or not needed:
+                    log.info("segmented %d/%d frames", done, len(pending))
+        except AnalysisError as exc:
+            log.error("sequence segmentation stopped: %s", exc)
+        summary.failed += len(needed)
+
+    def aligned_frame(self, index: int) -> np.ndarray:
+        return self._align(self.frames[index])[1]
+
+    def _align(self, frame_row: dict) -> tuple[np.ndarray, np.ndarray, object]:
+        image = read_image(self.experiment, frame_row["file"])
         if image.shape != self.reference.shape:
             raise AnalysisError(f"size {image.shape} differs from reference {self.reference.shape}")
-
         aligned, alignment = align_frame(
             image, self.reference, self.ref_markers, self.cfg.align,
             self.cfg.markers.dictionary, exclude=self.align_exclude,
         )
-        mask = self.segmenter.segment(aligned)
+        return image, aligned, alignment
+
+    def _measure(self, frame_row, image, aligned, alignment, mask) -> dict:
+        exp = self.experiment
         m = measure_extent(mask, self.annotations, self.cfg.front_percentile)
 
         flags = []
@@ -291,7 +348,7 @@ class Analyzer:
 
         stem = Path(frame_row["file"]).stem
         if self.cfg.save_masks:
-            mask_path = self.results_dir / "masks" / f"{stem}.png"
+            mask_path = self.masks_dir / f"{stem}.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(mask_path), mask.astype(np.uint8) * 255)
             row["mask_file"] = mask_path.relative_to(exp.root).as_posix()
@@ -299,7 +356,7 @@ class Analyzer:
             from fungus_cv.analyze.overlay import draw_overlay
 
             overlay = draw_overlay(aligned, mask, self.annotations, m, row)
-            overlay_path = self.results_dir / "overlays" / f"{stem}.jpg"
+            overlay_path = self.results_dir / "overlays" / self.settings_hash / f"{stem}.jpg"
             overlay_path.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(overlay_path), overlay, [cv2.IMWRITE_JPEG_QUALITY, 90])
             row["overlay_file"] = overlay_path.relative_to(exp.root).as_posix()

@@ -7,6 +7,7 @@ import numpy as np
 
 from fungus_cv.measure.geometry import Annotations
 from fungus_cv.segment.color import ColorThresholdSegmenter, hsv_range_from_samples
+from fungus_cv.segment.prompts import NEGATIVE, POSITIVE, FramePrompt
 
 MAX_VIEW = (1400, 900)
 ENTER_KEYS = (13, 10)
@@ -171,5 +172,108 @@ def pick_color(image: np.ndarray, **range_kwargs) -> list:
                 boxes.pop()
             elif key in ENTER_KEYS and ranges:
                 return ranges
+    finally:
+        cv2.destroyWindow(view.window)
+
+
+def prompt_target(image: np.ndarray, frame_file: str, preview=None,
+                  existing: FramePrompt | None = None) -> FramePrompt:
+    """Click on the target (left) and on things that are not the target (right).
+
+    ``preview(image, prompt) -> mask`` is called after each change to show what the model
+    would segment; it may be slow on a CPU.
+    """
+    view = _View(image, "fungus prompt")
+    points: list[tuple[float, float]] = list(existing.points) if existing else []
+    labels: list[int] = list(existing.labels) if existing else []
+    box: list = [existing.box] if existing and existing.box else []
+    state = {"box_mode": False, "drag": None, "dirty": True, "mask": None, "error": ""}
+
+    def on_mouse(event, x, y, flags, param):
+        view.mouse = (x, y)
+        if state["box_mode"]:
+            if event == cv2.EVENT_LBUTTONDOWN:
+                state["drag"] = view.to_full(x, y)
+            elif event == cv2.EVENT_LBUTTONUP and state["drag"] is not None:
+                (x0, y0), (x1, y1) = state["drag"], view.to_full(x, y)
+                state["drag"] = None
+                if abs(x1 - x0) > 3 and abs(y1 - y0) > 3:
+                    box[:] = [(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))]
+                    state["box_mode"] = False
+                    state["dirty"] = True
+            return
+        if event == cv2.EVENT_LBUTTONDOWN:
+            points.append(view.to_full(x, y))
+            labels.append(POSITIVE)
+            state["dirty"] = True
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            points.append(view.to_full(x, y))
+            labels.append(NEGATIVE)
+            state["dirty"] = True
+
+    def current() -> FramePrompt | None:
+        try:
+            return FramePrompt(frame_file, list(points), list(labels), box[0] if box else None)
+        except ValueError:
+            return None
+
+    cv2.setMouseCallback(view.window, on_mouse)
+    try:
+        while True:
+            prompt = current()
+            if state["dirty"]:
+                state["dirty"] = False
+                state["mask"], state["error"] = None, ""
+                if prompt is not None and preview is not None:
+                    view.show(view.base.copy(), ["running model..."])
+                    cv2.waitKey(1)
+                    try:
+                        state["mask"] = preview(image, prompt)
+                    except Exception as exc:  # show the problem instead of crashing the tool
+                        state["error"] = str(exc)[:120]
+
+            canvas = view.base.copy()
+            if state["mask"] is not None:
+                size = (canvas.shape[1], canvas.shape[0])
+                small = cv2.resize(state["mask"].astype(np.uint8), size,
+                                   interpolation=cv2.INTER_NEAREST).astype(bool)
+                tint = canvas.copy()
+                tint[small] = (255, 0, 255)
+                canvas = cv2.addWeighted(tint, 0.45, canvas, 0.55, 0)
+            for (px, py), label in zip(points, labels):
+                color = (0, 220, 0) if label == POSITIVE else (0, 0, 255)
+                cv2.circle(canvas, view.to_view((px, py)), 6, color, -1)
+                cv2.circle(canvas, view.to_view((px, py)), 6, (255, 255, 255), 1)
+            if box:
+                x0, y0, x1, y1 = box[0]
+                cv2.rectangle(canvas, view.to_view((x0, y0)), view.to_view((x1, y1)),
+                              (0, 255, 255), 2)
+            view.magnifier(canvas)
+            lines = [
+                "Left click: target   Right click: NOT target   b: draw box   c: clear",
+                "u: undo   Enter: save   Esc: cancel   (magenta = model's mask)",
+            ]
+            if state["box_mode"]:
+                lines.append("BOX MODE: drag a box around the target")
+            if state["error"]:
+                lines.append(f"model error: {state['error']}")
+            view.show(canvas, lines)
+
+            key = cv2.waitKey(20) & 0xFF
+            if key == ESC:
+                raise Cancelled()
+            if key == ord("u") and points:
+                points.pop()
+                labels.pop()
+                state["dirty"] = True
+            elif key == ord("c"):
+                points.clear()
+                labels.clear()
+                box.clear()
+                state["dirty"] = True
+            elif key == ord("b"):
+                state["box_mode"] = not state["box_mode"]
+            elif key in ENTER_KEYS and prompt is not None:
+                return prompt
     finally:
         cv2.destroyWindow(view.window)

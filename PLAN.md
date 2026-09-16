@@ -145,7 +145,7 @@ Moss and dye spread gradually, so the timeline is used as a check: flag any fram
 | M0 ✅ | Project skeleton: packaging, CLI, config, CI running tests on Win/macOS/Linux (GitHub Actions) | `fungus --help` works on all 3 OSes |
 | M1 🟡 | **Capture**: camera list, interval capture with locked settings, metadata, reconnect, import command | An 8-hour unattended run on Windows and macOS with no missed frames *(code done; hardware test still needed)* |
 | M2 🟡 | **Dye test, simple version**: HSV threshold + ArUco scale + extent along the towel axis + CSV and plot | Measured height matches a ruler to within ~2 mm; the √t fit looks reasonable *(code done and verified on synthetic data to <0.5 mm, recovering n = 0.50; still needs a real dye run)* |
-| M3 | **SAM 2 integration**: annotate tool, video propagation, device auto-detection, `Segmenter` interface | SAM 2 dye masks agree with the threshold masks (IoU > 0.9) |
+| M3 🟡 | **SAM 2 integration**: annotate tool, video propagation, device auto-detection, `Segmenter` interface | SAM 2 dye masks agree with the threshold masks (IoU > 0.9) *(done on synthetic data: mean IoU 0.991, min 0.913; still needs a real dye run. Built on HF `transformers`, streaming, cropped to the region)* |
 | M4 | **Robustness**: registration, lighting check, bad-frame skipping, jump detection, overlay video | Bumping the camera or turning a lamp on mid-run does not create fake growth |
 | M5 | **Moss on a plant**: stem skeleton axis, soil-line base, % of stem, logistic fit | Matches hand measurements on ~20 hand-labeled frames |
 | M6 | **Field mode**: 4-marker top-down view, coverage and edge advance, multiple plots per image | Area error < ~10% against hand-drawn outlines |

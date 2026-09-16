@@ -2,7 +2,7 @@
 
 Take time-lapse photos with a webcam, then measure how a spreading region (dye, moss, an infection) moves relative to a reference object over time. See [PLAN.md](PLAN.md) for the full roadmap.
 
-**Status:** capture (M1), color-threshold measurement (M2), SAM 2 segmentation (M3) and training your own models (M7) all work.
+**Status:** capture (M1), color-threshold measurement (M2), SAM 2 segmentation (M3), robustness to tilt/lighting/jumps (M4) and training your own models (M7) all work.
 
 Works on Windows, macOS and Linux (Python 3.10+).
 
@@ -85,6 +85,30 @@ It outputs parameters ± standard errors, R², and AIC (lower AIC = better model
 - Set `--t0` to the moment the towel touched the dye. Otherwise t = 0 is the first photo.
 - The dye-edge position depends on the color thresholds. To estimate that uncertainty, re-run with slightly wider and narrower `hsv_ranges` and compare. Archived results make this easy.
 
+## Robustness: tilted cameras, changing light, bad frames
+
+Each frame is prepared the same way before segmentation: **align** to the reference frame → **rectify** (optional) → **correct lighting** (optional). The interactive tools show frames prepared exactly this way, and so does anything that uses them later: annotations, prompts, color picking and dataset exports.
+
+**Tilted camera** (`analysis.rectify.enabled: true`): frames are warped to a top-down view of the plane the markers lie on.
+- All visible markers are fitted together so each becomes a square of the known size. Markers can be anywhere (on separate stakes in a field) and no printed layout is needed.
+- Use 2–4 markers spread around the measured area. A single marker works, but its correction extrapolates across the image.
+- Scenes showing the horizon (field shots) are handled by limiting the output to the area around the markers.
+- **Re-run `fungus annotate` after turning rectification on**, because the prepared image changes shape.
+- On a synthetic tilted scene, errors dropped from up to 9.6 mm to at most 0.26 mm.
+
+**Changing light** (`analysis.lighting.method`):
+- `patch` (most reliable): tape a white or grey card where it stays in view, and mark it in the optional last step of `fungus annotate`.
+- `background`: uses everything outside the measured region; the background must not change.
+- **How it works:** each color channel gets a gain so the reference region matches the first frame. This undoes overall brightness changes and color casts, but not shadows or glare on part of the scene.
+- **Recorded per frame:** gains are saved (`light_gain_b/g/r`). Frames needing more than a 30% correction are flagged `lighting_changed`, and clipped reference pixels are flagged `saturated`.
+- On a synthetic run where the lights dimmed, uncorrected frames lost the dye entirely (−80 mm of fake shrinkage). Corrected frames were within 0.1 mm.
+
+**Bad frames:**
+- `analyze` flags `align_failed`, `align_poor`, `blurry`, `brightness_changed`, `lighting_changed`, `saturated` and `no_target`.
+- `report` also marks **jumps** (a frame far off the robust local trend of its neighbors) and **retreats** (the front moving back by more than 3σ).
+- `results/report/frame_flags.csv` lists every frame's flags and whether it was used in the fits, so any exclusion can be audited.
+- Frames flagged `align_failed` or `blurry` are left out of fits by default. Jumps are only marked, unless you pass `--exclude-jumps`.
+
 ## Segmenting with SAM 2 (for targets a color threshold can't separate)
 
 Color thresholds work well for dye. Moss on bark or soil usually needs a model. SAM 2 finds the target from a few clicks, then **tracks it through the whole time-lapse**.
@@ -153,7 +177,7 @@ experiments/dye-test-1/
   frames/         # 2026-09-20T14-05-00.123Z_cam0.png ... (UTC time, sorts in time order)
   frames.csv      # one row per image or failed attempt (see below)
   capture.log
-  annotations.json  # base, tip and region (from `fungus annotate`)
+  annotations.json  # base, tip, region and optional neutral patch (from `fungus annotate`)
   prompts.json    # SAM clicks (from `fungus prompt`)
   results/        # measurements.csv, run_info.json, report/, archive/,
                   # masks/<run>/, overlays/<run>/, runs/<run>.json, compare/

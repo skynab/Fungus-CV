@@ -63,20 +63,22 @@ class _View:
 
 
 def annotate(image: np.ndarray, reference_file: str = "") -> Annotations:
-    """Click base, tip, then the region-of-interest polygon."""
+    """Click base, tip, the region-of-interest polygon, then optionally a neutral patch."""
     view = _View(image, "fungus annotate")
-    points: list[tuple[float, float]] = []
+    points: list[tuple[float, float]] = []  # base, tip, roi...
+    patch: list[tuple[float, float]] = []
+    state = {"roi_done": False}
 
     def on_mouse(event, x, y, flags, param):
         view.mouse = (x, y)
         if event == cv2.EVENT_LBUTTONDOWN:
-            points.append(view.to_full(x, y))
+            (patch if state["roi_done"] else points).append(view.to_full(x, y))
 
     cv2.setMouseCallback(view.window, on_mouse)
     nudges = {ord("i"): (0, -1), ord("k"): (0, 1), ord("j"): (-1, 0), ord("l"): (1, 0)}
     prompts = [
-        "1/3  Click the BASE: where growth starts (waterline, soil line)",
-        "2/3  Click the TIP: the far end of the object (top of towel/stem)",
+        "1/4  Click the BASE: where growth starts (waterline, soil line)",
+        "2/4  Click the TIP: the far end of the object (top of towel/stem)",
     ]
     try:
         while True:
@@ -89,29 +91,48 @@ def annotate(image: np.ndarray, reference_file: str = "") -> Annotations:
             if roi:
                 poly = np.array([view.to_view(p) for p in roi], np.int32)
                 cv2.polylines(canvas, [poly], len(roi) > 2, (0, 255, 255), 2)
-            stage = prompts[len(points)] if len(points) < 2 else (
-                f"3/3  Click corners AROUND the object ({len(roi)} so far), Enter when done")
+            if patch:
+                poly = np.array([view.to_view(p) for p in patch], np.int32)
+                cv2.polylines(canvas, [poly], len(patch) > 2, (255, 200, 0), 2)
+            if state["roi_done"]:
+                stage = (f"4/4  Optional: click corners of a NEUTRAL PATCH (white/grey card) "
+                         f"({len(patch)} so far). Enter to finish or skip")
+            elif len(points) < 2:
+                stage = prompts[len(points)]
+            else:
+                stage = f"3/4  Click corners AROUND the object ({len(roi)} so far), Enter when done"
+            active = patch if state["roi_done"] else points
             view.magnifier(canvas)
-            last = f"last point ({points[-1][0]:.1f}, {points[-1][1]:.1f})" if points else ""
+            last = f"last point ({active[-1][0]:.1f}, {active[-1][1]:.1f})" if active else ""
             view.show(canvas, [stage, "u: undo   r: restart   i/j/k/l: nudge last point 1 px   "
                                "Esc: cancel", last])
 
             key = cv2.waitKey(20) & 0xFF
             if key == ESC:
                 raise Cancelled()
-            if key == ord("u") and points:
-                points.pop()
-            elif key in nudges and points:
+            if key == ord("u"):
+                if patch:
+                    patch.pop()
+                elif state["roi_done"]:
+                    state["roi_done"] = False
+                elif points:
+                    points.pop()
+            elif key in nudges and active:
                 dx, dy = nudges[key]
-                points[-1] = (points[-1][0] + dx, points[-1][1] + dy)
+                active[-1] = (active[-1][0] + dx, active[-1][1] + dy)
             elif key == ord("r"):
                 points.clear()
-            elif key in ENTER_KEYS and len(roi) >= 3:
-                h, w = image.shape[:2]
-                return Annotations(
-                    base=points[0], tip=points[1], roi=roi, image_size=(w, h),
-                    reference_file=reference_file,
-                )
+                patch.clear()
+                state["roi_done"] = False
+            elif key in ENTER_KEYS:
+                if not state["roi_done"] and len(roi) >= 3:
+                    state["roi_done"] = True
+                elif state["roi_done"] and (not patch or len(patch) >= 3):
+                    h, w = image.shape[:2]
+                    return Annotations(
+                        base=points[0], tip=points[1], roi=roi, image_size=(w, h),
+                        reference_file=reference_file, reference_patch=patch or None,
+                    )
     finally:
         cv2.destroyWindow(view.window)
 

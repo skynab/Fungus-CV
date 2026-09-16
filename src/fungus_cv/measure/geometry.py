@@ -27,12 +27,17 @@ class Annotations:
     roi: list[tuple[float, float]]
     image_size: tuple[int, int]  # (width, height) of the reference frame
     reference_file: str = ""
+    # Optional polygon on a neutral surface that never changes (white/grey card), used by
+    # analysis.lighting.method: patch.
+    reference_patch: list[tuple[float, float]] | None = None
 
     def __post_init__(self) -> None:
         if len(self.roi) < 3:
             raise ValueError("roi needs at least 3 points")
         if math.dist(self.base, self.tip) < 1:
             raise ValueError("base and tip must be different points")
+        if self.reference_patch is not None and len(self.reference_patch) < 3:
+            raise ValueError("reference_patch needs at least 3 points")
 
     @property
     def axis_length_px(self) -> float:
@@ -56,7 +61,16 @@ class Annotations:
             roi=[tuple(p) for p in data["roi"]],
             image_size=tuple(data["image_size"]),
             reference_file=data.get("reference_file", ""),
+            reference_patch=[tuple(p) for p in data["reference_patch"]]
+            if data.get("reference_patch") else None,
         )
+
+    def patch_mask(self, shape: tuple[int, int]) -> np.ndarray | None:
+        if not self.reference_patch:
+            return None
+        mask = np.zeros(shape[:2], np.uint8)
+        cv2.fillPoly(mask, [np.round(np.array(self.reference_patch)).astype(np.int32)], 1)
+        return mask.astype(bool)
 
 
 @dataclass

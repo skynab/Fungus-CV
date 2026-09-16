@@ -37,6 +37,7 @@ class ReportResult:
     n_used: int
     n_excluded: int
     retreats: int
+    jumps: int = 0
     fits: list[FitResult] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
 
@@ -72,6 +73,43 @@ def count_retreats(y: np.ndarray, unc: np.ndarray) -> np.ndarray:
     return (running - y) > np.maximum(tol, 1e-9)
 
 
+def _theil_sen(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    """Robust line: median of pairwise slopes, so one bad point can't tilt it."""
+    i, j = np.triu_indices(len(x), k=1)
+    dx = x[j] - x[i]
+    ok = dx != 0
+    slope = float(np.median((y[j] - y[i])[ok] / dx[ok])) if ok.any() else 0.0
+    return slope, float(np.median(y - slope * x))
+
+
+def detect_jumps(t: np.ndarray, y: np.ndarray, unc: np.ndarray, window: int = 3,
+                 k: float = 4.0) -> np.ndarray:
+    """Frames far off the local trend of their neighbours (a robust Hampel-style test).
+
+    For each frame, a robust line is fitted through up to ``window`` usable frames on each
+    side; the frame is a jump if its residual exceeds ``k`` times the larger of the
+    neighbours' robust scatter (MAD) and the frame's own measurement uncertainty. The local
+    line keeps steady growth from being flagged. The first and last frames are not tested:
+    with neighbours on one side only, curvature can't be told apart from a jump.
+    """
+    n = len(y)
+    jumps = np.zeros(n, bool)
+    usable = np.flatnonzero(np.isfinite(y))
+    for pos, i in enumerate(usable):
+        before = usable[max(0, pos - window):pos]
+        after = usable[pos + 1:pos + 1 + window]
+        if len(before) == 0 or len(after) == 0 or len(before) + len(after) < 3:
+            continue
+        neighbours = np.r_[before, after]
+        slope, intercept = _theil_sen(t[neighbours], y[neighbours])
+        resid = y[neighbours] - (slope * t[neighbours] + intercept)
+        mad = 1.4826 * np.median(np.abs(resid - np.median(resid)))
+        u = unc[i] if np.isfinite(unc[i]) else 0.0
+        scale = max(mad, u, 1e-9 + 1e-6 * np.nanmax(np.abs(y)))
+        jumps[i] = abs(y[i] - (slope * t[i] + intercept)) > k * scale
+    return jumps
+
+
 def make_report(
     experiment: Experiment,
     metric: str | None = None,
@@ -81,6 +119,7 @@ def make_report(
     models: tuple[str, ...] = ("linear", "sqrt", "power", "logistic"),
     video: bool = False,
     fps: int = 10,
+    exclude_jumps: bool = False,
 ) -> ReportResult:
     import matplotlib
 
@@ -106,6 +145,9 @@ def make_report(
 
     flags = [set(filter(None, r["flags"].split(";"))) for r in rows]
     excluded = np.array([bool(f & set(exclude_flags)) for f in flags]) | np.isnan(y) | (t < 0)
+    jump = detect_jumps(t, np.where(excluded, np.nan, y), unc) & ~excluded
+    if exclude_jumps:
+        excluded = excluded | jump
     retreat = count_retreats(np.where(excluded, np.nan, y), unc) & ~excluded
     use = ~excluded
 
@@ -118,8 +160,20 @@ def make_report(
         metric=metric, time_unit=time_unit,
         t0_utc=iso_utc(datetime.fromtimestamp(t0_ts, timezone.utc)),
         n_used=int(use.sum()), n_excluded=int(excluded.sum()),
-        retreats=int(retreat.sum()), fits=fits,
+        retreats=int(retreat.sum()), jumps=int(jump.sum()), fits=fits,
     )
+
+    # Every frame's flags in one place, so exclusions can be audited.
+    flags_csv = out_dir / "frame_flags.csv"
+    with open(flags_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["timestamp_utc", "frame_file", f"t_{time_unit}", metric,
+                         "pipeline_flags", "jump", "retreat", "used_in_fits"])
+        for i, r in enumerate(rows):
+            writer.writerow([r["timestamp_utc"], r["frame_file"], round(float(t[i]), 6),
+                             r[metric], r["flags"], int(jump[i]), int(retreat[i]),
+                             int(use[i])])
+    result.files.append(flags_csv)
 
     # --- main plot: metric over time with fits ---------------------------------------
     label = {"extent_mm": "Extent (mm)", "extent_px": "Extent (px)",
@@ -135,6 +189,10 @@ def make_report(
     if excluded.any():
         ax.plot(t[excluded], y[excluded], "x", ms=6, color=INK_2, alpha=0.6,
                 label="excluded (flagged)", zorder=3)
+    if jump.any():
+        ax.plot(t[jump], y[jump], "s", ms=10, mfc="none", mec=INK, mew=1.2,
+                label="jump from local trend" + (" (excluded)" if exclude_jumps else ""),
+                zorder=4)
     if retreat.any():
         ax.plot(t[retreat], y[retreat], "o", ms=9, mfc="none", mec=INK, mew=1.2,
                 label="retreat > 3σ (check frame)", zorder=4)
@@ -161,6 +219,8 @@ def make_report(
     # --- quality control: one measure per panel, shared time axis --------------------
     qc = [("mean_brightness", "Brightness (0-255)"), ("align_shift_px", "Alignment shift (px)"),
           ("align_rms_px", "Alignment residual (px)"), ("coverage_pct", "Coverage (%)")]
+    if any(r.get("light_gain_g") not in ("", None) for r in rows):
+        qc.insert(1, ("light_gain_g", "Lighting gain (green)"))
     fig, axes = plt.subplots(len(qc), 1, figsize=(8, 8), dpi=150, sharex=True)
     for ax, (col, title) in zip(axes, qc):
         _style(ax)
@@ -179,6 +239,7 @@ def make_report(
         "metric": metric, "time_unit": time_unit, "t0": result.t0_utc,
         "n_used": result.n_used, "n_excluded": result.n_excluded,
         "excluded_flags": list(exclude_flags), "retreats": result.retreats,
+        "jumps": result.jumps, "jumps_excluded": exclude_jumps,
         "weighted_by_uncertainty": sigma is not None,
         "fits": [f.to_dict() for f in fits],
     }

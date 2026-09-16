@@ -279,17 +279,6 @@ def status(experiment: Path = typer.Argument(..., help="Experiment folder.")) ->
 # --- analysis -------------------------------------------------------------------------
 
 
-def _reference_image(exp):
-    from fungus_cv.analyze.pipeline import AnalysisError, frames_for_analysis, read_image
-
-    try:
-        row = frames_for_analysis(exp)[0]
-        return row, read_image(exp, row["file"])
-    except AnalysisError as exc:
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(1) from exc
-
-
 @app.command()
 def markers(
     output: Path = typer.Argument(Path("markers.png"), help="Image file to write (PNG or PDF)."),
@@ -326,12 +315,18 @@ def markers(
 @app.command()
 def annotate(experiment: Path = typer.Argument(..., help="Experiment folder.")) -> None:
     """Click the base, tip and region to measure on the reference (first) frame."""
-    from fungus_cv.analyze.pipeline import annotations_path
+    from fungus_cv.analyze.pipeline import AnalysisError, Analyzer, annotations_path
     from fungus_cv.ui.interactive import Cancelled
     from fungus_cv.ui.interactive import annotate as run_annotate
 
     exp = _load_experiment(experiment)
-    row, image = _reference_image(exp)
+    _setup_logging()
+    try:  # show the reference as the pipeline prepares it (e.g. rectified)
+        analyzer = Analyzer(exp, with_segmenter=False, require_annotations=False)
+    except AnalysisError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    row, image = analyzer.reference_row, analyzer.reference
     try:
         ann = run_annotate(image, reference_file=row["file"])
     except Cancelled:
@@ -353,7 +348,6 @@ def pick_color(
     """Measure the target's color by dragging boxes over it, then save the HSV ranges."""
     import cv2
 
-    from fungus_cv.analyze.pipeline import frames_for_analysis, read_image
     from fungus_cv.config import replace_hsv_ranges_in_yaml
     from fungus_cv.ui.interactive import Cancelled
     from fungus_cv.ui.interactive import pick_color as run_pick
@@ -365,8 +359,14 @@ def pick_color(
             typer.secho(f"cannot read {frame}", fg=typer.colors.RED, err=True)
             raise typer.Exit(1)
     else:
-        _reference_image(exp)  # validates that frames exist
-        image = read_image(exp, frames_for_analysis(exp)[-1]["file"])
+        from fungus_cv.analyze.pipeline import AnalysisError, Analyzer
+
+        try:  # sample colours as the segmenter will see them (rectified, lighting-corrected)
+            analyzer = Analyzer(exp, with_segmenter=False, require_annotations=False)
+            image = analyzer.aligned_frame(len(analyzer.frames) - 1)
+        except AnalysisError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(1) from exc
     try:
         ranges = run_pick(image)
     except Cancelled:
@@ -430,6 +430,8 @@ def report(
     time_unit: str = typer.Option("auto", help="auto | s | min | h | d"),
     include_flagged: bool = typer.Option(False, help="Fit flagged frames too."),
     video: bool = typer.Option(False, help="Also write an overlay time-lapse video."),
+    exclude_jumps: bool = typer.Option(False, help="Leave frames that jump off the local "
+                                       "trend out of the fits (they are always marked)."),
 ) -> None:
     """Fit growth models and write plots to results/report/."""
     from fungus_cv.analyze.report import DEFAULT_EXCLUDE, make_report
@@ -442,13 +444,15 @@ def report(
         result = make_report(
             exp, metric=metric, t0=t0, time_unit=time_unit,
             exclude_flags=() if include_flagged else DEFAULT_EXCLUDE, video=video,
+            exclude_jumps=exclude_jumps,
         )
     except (FileNotFoundError, ValueError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
 
     typer.echo(f"{result.metric}: {result.n_used} frames used, {result.n_excluded} excluded, "
-               f"{result.retreats} retreat(s) to check; time in {result.time_unit}")
+               f"{result.retreats} retreat(s) and {result.jumps} jump(s) to check "
+               f"(see frame_flags.csv); time in {result.time_unit}")
     ok = [f for f in result.fits if f.ok]
     best_aic = min((f.aic for f in ok), default=None)
     for fit in result.fits:

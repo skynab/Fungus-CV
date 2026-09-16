@@ -193,12 +193,30 @@ class MarkerConfig(BaseModel):
     size_mm: float | None = Field(None, gt=0)
 
 
+class RectifyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Warp frames to a top-down view of the marker plane (needs markers.size_mm).
+    enabled: bool = False
+    max_side_px: int = Field(6000, ge=256)
+
+
+class LightingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # none | patch (neutral card marked with `fungus annotate`) | background (outside the region)
+    method: Literal["none", "patch", "background"] = "none"
+    flag_change: float = Field(0.3, gt=0)  # flag frames whose gains differ from 1 by more
+
+
 class AnalysisConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     camera: str | None = None  # default: the camera with the most frames
     align: Literal["markers_or_ecc", "markers", "ecc", "none"] = "markers_or_ecc"
     markers: MarkerConfig = Field(default_factory=MarkerConfig)
+    rectify: RectifyConfig = Field(default_factory=RectifyConfig)
+    lighting: LightingConfig = Field(default_factory=LightingConfig)
     target: TargetConfig = Field(default_factory=TargetConfig)
     # Front position across the object's width: 50 = median front, 100 = highest point.
     front_percentile: float = Field(50.0, ge=0, le=100)
@@ -281,6 +299,12 @@ analysis:
   markers:
     dictionary: DICT_4X4_50   # must match the printed sheet (`fungus markers`)
     size_mm: null         # black square edge as printed, measured with a ruler, e.g. 30.0
+  rectify:                # correct a camera that isn't square-on to the measured plane
+    enabled: false        # true: warp to a top-down view using the markers (run annotate after)
+    max_side_px: 6000
+  lighting:               # compensate brightness / colour changes between frames
+    method: none          # none | patch (neutral card, marked in annotate) | background
+    flag_change: 0.3      # flag frames needing more than a 30% correction
   target:
     method: color         # color | sam2 | model (sam2 and model need: pip install -e ".[sam]")
     color:

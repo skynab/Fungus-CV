@@ -240,6 +240,21 @@ class MeasureConfig(BaseModel):
     smooth_px: float | None = Field(None, gt=0)  # centerline smoothing; None = automatic
 
 
+class UncertaintyConfig(BaseModel):
+    """How much segmentation settings are nudged to estimate where the edge could be.
+
+    Each frame is also segmented with a narrower and a wider setting; the spread of the
+    resulting measurements is treated as a rectangular distribution (GUM type B).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    segmentation: bool = True
+    hsv_delta: tuple[int, int, int] = (4, 20, 20)  # color: H, S, V bounds moved in and out
+    probability_delta: float = Field(0.1, gt=0, lt=0.5)  # model: threshold +/- this
+    logit_delta: float = Field(1.0, gt=0)  # sam2: mask_threshold +/- this (logits)
+
+
 class AnalysisConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -251,6 +266,7 @@ class AnalysisConfig(BaseModel):
     target: TargetConfig = Field(default_factory=TargetConfig)
     reference: ReferenceConfig = Field(default_factory=ReferenceConfig)
     measure: MeasureConfig = Field(default_factory=MeasureConfig)
+    uncertainty: UncertaintyConfig = Field(default_factory=UncertaintyConfig)
     # Front position across the object's width: 50 = median front, 100 = highest point.
     front_percentile: float = Field(50.0, ge=0, le=100)
     save_masks: bool = True
@@ -396,6 +412,11 @@ analysis:
                              # of the reference object in each frame (needs reference.method)
     corridor_px: null     # ignore target further than this from the path (null = whole region)
     smooth_px: null       # centerline smoothing length; null = about twice the stem width
+  uncertainty:            # segmentation uncertainty: re-segment each frame narrower and wider
+    segmentation: true    # adds *_seg_unc columns and includes them in extent_mm_unc
+    hsv_delta: [4, 20, 20]    # color: HSV bounds moved in and out by this much
+    probability_delta: 0.1    # model: probability threshold +/- this
+    logit_delta: 1.0          # sam2: mask_threshold +/- this
   front_percentile: 50    # front across the width: 50 = median, 100 = highest point
   save_masks: true
   save_overlays: true

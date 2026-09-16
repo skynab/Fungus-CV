@@ -14,7 +14,7 @@ from fungus_cv.measure.path import ExtentMeasurement, Polyline, measure_along_pa
 
 ANNOTATIONS_NAME = "annotations.json"
 
-__all__ = ["Annotations", "ExtentMeasurement", "Plot", "measure_extent",
+__all__ = ["Annotations", "ExtentMeasurement", "Plot", "area_uncertainty_mm2", "measure_extent",
            "extent_uncertainty_mm", "plots_hull"]
 
 
@@ -201,17 +201,34 @@ def extent_uncertainty_mm(
     mm_per_px: float,
     scale_se_mm_per_px: float,
     align_rms_px: float | None,
+    segmentation_px: float | None = None,
 ) -> float:
     """Combined standard uncertainty of an extent in mm (independent terms in quadrature).
 
     - scale: uncertainty of mm/px from the marker edges, times the extent
     - pixel: front position quantized to whole pixels (uniform, sd = 1/sqrt(12) px)
     - alignment: residual registration error between this frame and the reference
-
-    Segmentation uncertainty (where exactly the color threshold puts the edge) is not
-    included; estimate it by re-running with slightly different thresholds.
+    - segmentation: where the segmenter puts the edge, from re-segmenting with narrower and
+      wider settings (``analysis.uncertainty``); left out when that is off
     """
     scale_term = extent_px * scale_se_mm_per_px
     pixel_term = mm_per_px / math.sqrt(12)
     align_term = (align_rms_px or 0.0) * mm_per_px
-    return math.sqrt(scale_term**2 + pixel_term**2 + align_term**2)
+    seg_term = (segmentation_px or 0.0) * mm_per_px
+    return math.sqrt(scale_term**2 + pixel_term**2 + align_term**2 + seg_term**2)
+
+
+def area_uncertainty_mm2(
+    area_px: float,
+    mm_per_px: float,
+    scale_se_mm_per_px: float,
+    segmentation_px: float | None = None,
+) -> float:
+    """Combined standard uncertainty of an area in mm^2.
+
+    The scale enters squared, so its relative uncertainty counts twice. Segmentation is the
+    spread in pixel count between narrower and wider masks (``None`` when off).
+    """
+    scale_term = 2 * area_px * mm_per_px * scale_se_mm_per_px
+    seg_term = (segmentation_px or 0.0) * mm_per_px**2
+    return math.sqrt(scale_term**2 + seg_term**2)

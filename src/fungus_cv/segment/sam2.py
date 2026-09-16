@@ -58,6 +58,7 @@ class Sam2VideoSegmenter:
     mask_threshold: float = 0.0
     min_blob_area_px: int = 0
     prompts_digest: str = ""
+    variant_logit_delta: float | None = None  # for segmentation uncertainty
     name: str = field(default="sam2", init=False)
 
     @classmethod
@@ -98,7 +99,7 @@ class Sam2VideoSegmenter:
         window = self._window(w, h)
         stream = _Stream(self, window, (h, w))
         stream.add_prompt(0, prompt)
-        return stream.step(0, image)
+        return stream.step(0, image)[0]
 
     # --- sequence ---------------------------------------------------------------------
 
@@ -107,7 +108,8 @@ class Sam2VideoSegmenter:
         frame_files: list[str],
         load: Callable[[int], np.ndarray],
         needed: set[int],
-    ) -> Iterator[tuple[int, np.ndarray]]:
+    ) -> Iterator[tuple]:
+        """Yield ``(index, mask)``, or ``(index, mask, variants)`` when variants are on."""
         index = {f: i for i, f in enumerate(frame_files)}
         keyframes: dict[int, FramePrompt] = {}
         for prompt in self.prompts.frames:
@@ -131,9 +133,9 @@ class Sam2VideoSegmenter:
             for step, i in enumerate(range(first_key, last_needed + 1)):
                 if i in keyframes:
                     stream.add_prompt(step, keyframes[i])
-                mask = stream.step(step, reference if i == first_key else load(i))
+                result = stream.step(step, reference if i == first_key else load(i))
                 if i in needed:
-                    yield i, mask
+                    yield (i, *result)
 
         # Backward in time for frames before the first prompt (e.g. before the dye arrived).
         before = sorted((i for i in needed if i < first_key), reverse=True)
@@ -142,9 +144,9 @@ class Sam2VideoSegmenter:
             for step, i in enumerate(range(first_key, before[-1] - 1, -1)):
                 if step == 0:
                     stream.add_prompt(0, keyframes[first_key])
-                mask = stream.step(step, reference if i == first_key else load(i))
+                result = stream.step(step, reference if i == first_key else load(i))
                 if i in needed and i != first_key:
-                    yield i, mask
+                    yield (i, *result)
 
     def _window(self, width: int, height: int) -> CropWindow:
         if self.crop is not None:
@@ -192,19 +194,21 @@ class _Stream:
             original_size=self.crop_hw, **kwargs,
         )
 
-    def step(self, step: int, aligned_bgr: np.ndarray) -> np.ndarray:
+    def step(self, step: int, aligned_bgr: np.ndarray) -> tuple:
+        """``(mask,)``, or ``(mask, [narrower, wider])`` when variants are on."""
         rgb = cv2.cvtColor(self.window.crop(aligned_bgr), cv2.COLOR_BGR2RGB)
         inputs = self.processor(images=rgb, device=self.device, return_tensors="pt")
         pixel_values = inputs.pixel_values[0].to(self.device, dtype=self.dtype)
         out = self.model(inference_session=self.session, frame_idx=step, frame=pixel_values)
-        masks = self.processor.post_process_masks(
-            [out.pred_masks.float()], original_sizes=[list(self.crop_hw)],
-            mask_threshold=self.seg.mask_threshold, binarize=True,
-        )[0]
-        crop_mask = masks[0, 0].cpu().numpy().astype(bool)
+        logits = self.processor.post_process_masks(
+            [out.pred_masks.float()], original_sizes=[list(self.crop_hw)], binarize=False,
+        )[0][0, 0].cpu().numpy()
         self._prune(step)
-        mask = self.window.paste(crop_mask, *self.full_hw)
-        return _drop_small_blobs(mask, self.seg.min_blob_area_px)
+        t, delta = self.seg.mask_threshold, self.seg.variant_logit_delta
+        thresholds = [t] if delta is None else [t, t + delta, t - delta]
+        masks = [_drop_small_blobs(self.window.paste(logits > x, *self.full_hw),
+                                   self.seg.min_blob_area_px) for x in thresholds]
+        return (masks[0],) if delta is None else (masks[0], masks[1:])
 
     def _prune(self, step: int) -> None:
         """Free per-frame state SAM 2 no longer reads, so long runs don't exhaust memory."""

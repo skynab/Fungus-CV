@@ -215,7 +215,8 @@ def make_report(
         time_unit = pick_time_unit(times[-1] - t0_ts)
     t = (times - t0_ts) / TIME_UNITS[time_unit]
     y = np.array([_float(r[metric]) for r in rows])
-    unc = np.array([_float(r["extent_mm_unc"]) for r in rows]) if metric == "extent_mm" \
+    unc_column = f"{metric}_unc"
+    unc = np.array([_float(r.get(unc_column, "")) for r in rows]) if unc_column in rows[0] \
         else np.full(len(rows), math.nan)
 
     flags = [set(filter(None, r["flags"].split(";"))) for r in rows]

@@ -20,6 +20,7 @@ class ColorThresholdSegmenter:
     open_px: int = 3
     close_px: int = 7
     min_blob_area_px: int = 50
+    variant_hsv_delta: tuple[int, int, int] | None = None  # for segmentation uncertainty
     name: str = field(default="color", init=False)
 
     @classmethod
@@ -32,9 +33,20 @@ class ColorThresholdSegmenter:
         )
 
     def segment(self, image: np.ndarray) -> np.ndarray:
+        return self._mask(cv2.cvtColor(image, cv2.COLOR_BGR2HSV), self.ranges)
+
+    def segment_variants(self, image: np.ndarray) -> tuple[np.ndarray, list[np.ndarray]]:
+        """The mask, plus masks with every range narrowed and widened by ``variant_hsv_delta``."""
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        mask = self._mask(hsv, self.ranges)
+        if self.variant_hsv_delta is None:
+            return mask, []
+        return mask, [self._mask(hsv, shift_ranges(self.ranges, self.variant_hsv_delta, sign))
+                      for sign in (-1, 1)]
+
+    def _mask(self, hsv: np.ndarray, ranges: list[HsvBounds]) -> np.ndarray:
         mask = np.zeros(hsv.shape[:2], np.uint8)
-        for lower, upper in self.ranges:
+        for lower, upper in ranges:
             mask |= cv2.inRange(hsv, np.array(lower, np.uint8), np.array(upper, np.uint8))
         if self.open_px > 1:
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _kernel(self.open_px))
@@ -55,6 +67,27 @@ class ColorThresholdSegmenter:
             "close_px": self.close_px,
             "min_blob_area_px": self.min_blob_area_px,
         }
+
+
+def shift_ranges(ranges: list[HsvBounds], delta, sign: int) -> list[HsvBounds]:
+    """Widen (``sign`` +1) or narrow (-1) HSV ranges by ``delta`` = (H, S, V).
+
+    Bounds at the ends of a channel (H 0/179, S and V 0/255) stay put: they mean "no limit"
+    or are the seam of a hue range split across red, so moving them would be meaningless.
+    A range narrowed to nothing collapses to its middle value.
+    """
+    out = []
+    for lower, upper in ranges:
+        lo, hi = [], []
+        for low, up, top, d in zip(lower, upper, (179, 255, 255), delta):
+            new_lo = low if low == 0 else min(max(low - sign * d, 0), top)
+            new_hi = up if up == top else min(max(up + sign * d, 0), top)
+            if new_lo > new_hi:
+                new_lo = new_hi = (low + up) // 2
+            lo.append(int(new_lo))
+            hi.append(int(new_hi))
+        out.append((tuple(lo), tuple(hi)))
+    return out
 
 
 def hsv_range_from_samples(

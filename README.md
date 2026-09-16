@@ -77,7 +77,7 @@ What `analyze` does for each frame:
    - `extent_mm`: the front's median height across the towel's width, measured from the base along the base→tip axis.
    - `extent_max_mm`: the highest point the front reaches.
    - Area and coverage %.
-4. **Uncertainty:** `extent_mm_unc` is a combined standard uncertainty from the marker scale, pixel size and alignment residual. It does not include how exactly the threshold places the dye edge; see *Accuracy notes*.
+4. **Uncertainty:** `extent_mm_unc` is a combined standard uncertainty from the marker scale, pixel size, alignment residual and segmentation (where the edge is placed); see *Segmentation uncertainty* below.
 5. **Flag** frames that are doubtful: `align_failed`, `align_poor`, `no_target`, `brightness_changed`, `blurry`.
 
 Results go to `results/measurements.csv`, with a mask and an overlay image per frame.
@@ -103,7 +103,30 @@ It outputs parameters ± standard errors, R², and AIC (lower AIC = better model
 ### Accuracy notes
 - Markers must lie in the same plane as the object, and the camera should face that plane square-on. The analysis warns if marker edges disagree by more than 2%, which suggests a tilted view.
 - Set `--t0` to the moment the towel touched the dye. Otherwise t = 0 is the first photo.
-- The dye-edge position depends on the color thresholds. To estimate that uncertainty, re-run with slightly wider and narrower `hsv_ranges` and compare. Archived results make this easy.
+- The dye-edge position depends on the color thresholds. This is measured for every frame; see *Segmentation uncertainty*.
+
+### Segmentation uncertainty
+
+A sharp edge lands in the same place whatever the exact threshold, but a fading one doesn't. So each frame is also segmented once narrower and once wider, and the spread of the results goes into the uncertainty.
+
+| Method | Narrower / wider | Setting |
+|---|---|---|
+| color | every HSV bound moved in / out (H, S, V) | `analysis.uncertainty.hsv_delta: [4, 20, 20]` |
+| model | probability threshold + / − | `probability_delta: 0.1` |
+| sam2 | `mask_threshold` + / − on SAM's logits | `logit_delta: 1.0` |
+
+- **Cost:** the model's probabilities and SAM's logits are computed once and thresholded three times, so this is almost free. Colour thresholds run three times.
+- **Statistics:** the nominal, narrow and wide values are taken as the bounds of a rectangular distribution: u = (max − min) / (2√3) (GUM type B).
+- **Columns:**
+  - `extent_mm_seg_unc` and `extent_px_seg_unc`: the segmentation term on its own. It is also added in quadrature to `extent_mm_unc`.
+  - `target_area_mm2_unc`: scale (counted twice, since area scales with its square) and segmentation.
+  - `coverage_pct_unc`: segmentation only.
+- **Reports:** `report` weights fits by `<metric>_unc` for any metric that has one, so area fits are weighted too.
+- **Limits:**
+  - The deltas are a judgement call: choose them as the range of settings you'd consider equally right, and state them in your methods.
+  - For `path_source: reference`, the stem centerline is kept fixed across the variants.
+  - Turn it off with `analysis.uncertainty.segmentation: false`.
+- **Existing results:** the new settings change the settings hash, so existing results are archived and measured again on the next `analyze`. That takes a while for SAM runs.
 
 ## Field plots: coverage, spread and colour
 
@@ -174,6 +197,37 @@ This reports Bland–Altman agreement between automatic and hand values:
 - the frame with the largest difference
 
 It also writes paired values and an agreement plot to `results/validation/`. If several people measure, add an `observer` column to track who measured each frame.
+
+**Are the uncertainties honest?** When the metric has an uncertainty column (e.g. `extent_mm_unc`), `validate` also reports:
+- the share of automatic − hand differences within 2 combined uncertainties (expect about 95%)
+- the RMS of the differences divided by their uncertainties (expect about 1)
+
+Put your own reading uncertainty in the optional `value_unc` column; it is combined in quadrature. Much less than 95% means the reported uncertainties are too small, or there is a bias.
+
+### Validation suite: re-check accuracy after every change
+
+Collect your hand-labeled real data once, then re-run every accuracy check with one command:
+
+```bash
+fungus validate-suite validation/suite.yaml --init    # example file to edit
+fungus validate-suite validation/suite.yaml --save-baseline   # first time, once results look right
+fungus validate-suite validation/suite.yaml           # after any code or settings change
+```
+
+A suite lists **cases**. Each case runs one or more **checks**, and each check sets bounds on its metrics (`min`, `max`, `abs_max` or `max_drift`):
+
+| Check | Compares | Metrics |
+|---|---|---|
+| `masks` | the current run's masks with hand-drawn mask PNGs named like the frames | `iou_mean`, `iou_median`, `iou_min`, `extent_diff_mean`, `extent_diff_sd`, `n_frames` |
+| `measurements` | measurements with a hand CSV (`validate`) | `bias`, `bias_ci_low/high`, `loa_low/high`, `sd_diff`, `mae`, `rmse`, `pearson_r`, `slope`, `intercept`, `within_2u`, `z_rms`, `n` |
+| `model` | a trained model with a labeled test set (`evaluate`) | `iou_mean`, `dice_mean`, `precision_mean`, `recall_mean`, `boundary_f1_2px_mean`, `*_min`, and `unseen_*` for items not used in training |
+
+- **Analysis first:** experiments are analyzed with the current code before checking (`analyze: false` skips that).
+- **Baseline:** `max_drift` compares a metric with `baseline.json`, which `--save-baseline` writes. A change that moves IoU or bias more than you allow fails, even when the result is still within its absolute limits.
+- **Outputs:** each run writes `suite_results/<time>/results.json` and `summary.csv`. They record every value, its baseline and drift, the pass/fail reasons, the settings hash of each experiment, each model's weights hash, and the fungus-cv version and git commit.
+- **Exit code:** 1 if any check fails, so it can gate a merge.
+- **From pytest:** `FUNGUS_SUITE=validation/suite.yaml pytest tests/test_suite.py`.
+- **Starting set:** about 10 dye frames and 5 moss frames with hand masks, plus 20 hand-measured frames per experiment. Keep the data (or an archive of it) with the suite so results can be reproduced.
 
 ## Robustness: tilted cameras, changing light, bad frames
 

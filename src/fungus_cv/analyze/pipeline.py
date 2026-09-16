@@ -6,6 +6,7 @@ import csv
 import hashlib
 import json
 import logging
+import math
 import os
 import time
 from collections import Counter
@@ -18,14 +19,19 @@ import numpy as np
 from fungus_cv import __version__
 from fungus_cv.measure.centerline import CenterlineError, centerline_from_mask
 from fungus_cv.measure.color_indices import color_indices
-from fungus_cv.measure.geometry import ANNOTATIONS_NAME, Annotations, extent_uncertainty_mm
+from fungus_cv.measure.geometry import (
+    ANNOTATIONS_NAME,
+    Annotations,
+    area_uncertainty_mm2,
+    extent_uncertainty_mm,
+)
 from fungus_cv.measure.path import ExtentMeasurement, Polyline, measure_along_path
 from fungus_cv.preprocess.align import ECC_POOR, Alignment, align_frame
 from fungus_cv.preprocess.lighting import LightingNormalizer, LightingResult
 from fungus_cv.preprocess.markers import Scale, detect_markers, scale_from_markers
 from fungus_cv.preprocess.rectify import Rectification, fit_rectification
 from fungus_cv.quality import contrast_normalized_sharpness, mean_brightness, sharpness
-from fungus_cv.segment.base import build_segmenter, is_sequence_segmenter
+from fungus_cv.segment.base import build_segmenter, is_sequence_segmenter, segment_with_variants
 from fungus_cv.storage import Experiment, iso_utc, utc_now
 
 log = logging.getLogger(__name__)
@@ -40,9 +46,10 @@ MEASUREMENT_FIELDS = [
     "target_px", "front_width_px", "extent_px", "extent_max_px", "extent_fraction",
     "path_length_px", "covered_length_px", "covered_length_pct",
     "reference_px", "reference_covered_pct",
-    "extent_mm", "extent_mm_unc", "extent_max_mm", "axis_length_mm", "covered_length_mm",
-    "reference_area_mm2",
-    "target_area_mm2", "roi_area_mm2", "coverage_pct", "equivalent_radius_mm",
+    "extent_mm", "extent_mm_unc", "extent_mm_seg_unc", "extent_px_seg_unc",
+    "extent_max_mm", "axis_length_mm", "covered_length_mm", "reference_area_mm2",
+    "target_area_mm2", "target_area_mm2_unc", "roi_area_mm2", "coverage_pct", "coverage_pct_unc",
+    "equivalent_radius_mm",
     "gcc_mean", "gcc_p90", "rcc_mean", "exg_mean",
     "mean_brightness", "sharpness", "light_gain_b", "light_gain_g", "light_gain_r",
     "flags", "mask_file", "overlay_file",
@@ -228,7 +235,7 @@ class Analyzer:
                              for p in self.plots if p.has_axis}
         try:
             self.segmenter = build_segmenter(self.cfg.target, experiment.root,
-                                             self.annotations.roi)
+                                             self.annotations.roi, self.cfg.uncertainty)
             self.reference_segmenter = None
             if self.cfg.reference.method != "none":
                 self.reference_segmenter = build_segmenter(self.cfg.reference, experiment.root,
@@ -319,7 +326,7 @@ class Analyzer:
         if self.reference_segmenter is not None:
             # Pass 1: the reference object (e.g. stem), saved so pass 2 can measure against it.
             ref_summary = AnalysisSummary()
-            for n, (i, _, ref_mask) in enumerate(self._iter_masks(self.reference_segmenter,
+            for n, (i, _, ref_mask, _) in enumerate(self._iter_masks(self.reference_segmenter,
                                                                   pending, ref_summary), 1):
                 if should_stop and should_stop():
                     return summary
@@ -331,7 +338,7 @@ class Analyzer:
             if ref_summary.failed:
                 log.warning("reference segmentation failed for %d frame(s)", ref_summary.failed)
 
-        for i, prepared, mask in self._iter_masks(self.segmenter, pending, summary):
+        for i, prepared, mask, variants in self._iter_masks(self.segmenter, pending, summary):
             if should_stop and should_stop():
                 summary.stopped = True
                 break
@@ -339,7 +346,7 @@ class Analyzer:
             if self.reference_segmenter is not None:
                 ref_img = cv2.imread(str(self._reference_mask_path(i)), cv2.IMREAD_GRAYSCALE)
                 ref_mask = None if ref_img is None else ref_img > 127
-            rows = self._measure(self.frames[i], prepared, mask, ref_mask)
+            rows = self._measure(self.frames[i], prepared, mask, ref_mask, variants)
             for row in rows:
                 self._append(row)
                 for flag in filter(None, row["flags"].split(";")):
@@ -353,7 +360,7 @@ class Analyzer:
         return self.masks_dir / "reference" / f"{Path(self.frames[index]['file']).stem}.png"
 
     def _iter_masks(self, segmenter, pending: list[int], summary: AnalysisSummary):
-        """Yield ``(index, prepared frame, mask)`` for pending frames, for any segmenter."""
+        """Yield ``(index, prepared frame, mask, variant masks)`` for pending frames."""
         if is_sequence_segmenter(segmenter):
             yield from self._iter_sequence(segmenter, pending, summary)
             return
@@ -361,12 +368,12 @@ class Analyzer:
             frame_row = self.frames[i]
             try:
                 prepared = self._prepare(frame_row)
-                mask = segmenter.segment(prepared.frame)
+                mask, variants = segment_with_variants(segmenter, prepared.frame)
             except AnalysisError as exc:
                 log.error("%s: %s", frame_row["file"], exc)
                 summary.failed += 1
                 continue
-            yield i, prepared, mask
+            yield i, prepared, mask, variants
 
     def _iter_sequence(self, segmenter, pending: list[int], summary: AnalysisSummary):
         """Memory-based segmenters see frames in order; only ``pending`` masks are yielded."""
@@ -383,9 +390,9 @@ class Analyzer:
 
         files = [r["file"] for r in self.frames]
         try:
-            for i, mask in segmenter.segment_sequence(files, load, needed):
+            for i, mask, *variants in segmenter.segment_sequence(files, load, needed):
                 prepared = cache.pop(i) if i in cache else self._prepare(self.frames[i])
-                yield i, prepared, mask
+                yield i, prepared, mask, variants[0] if variants else []
                 needed.discard(i)
                 done = len(pending) - len(needed)
                 if done % 10 == 0 or not needed:
@@ -468,6 +475,13 @@ class Analyzer:
             flags.append("centerline_failed")
             return static
 
+    def _measure_mask(self, mask: np.ndarray, path: Polyline | None, region: np.ndarray,
+                      reference: np.ndarray | None) -> ExtentMeasurement:
+        if path is not None:
+            return measure_along_path(mask, path, region, self.cfg.front_percentile,
+                                      self.cfg.measure.corridor_px, reference_mask=reference)
+        return _area_only(mask, region, reference)
+
     def _frame_flags(self, prepared: Prepared) -> tuple[list[str], dict]:
         image, alignment = prepared.image, prepared.alignment
         flags = []
@@ -504,8 +518,13 @@ class Analyzer:
         return flags, info
 
     def _measure(self, frame_row: dict, prepared: Prepared, mask: np.ndarray,
-                 ref_mask: np.ndarray | None = None) -> list[dict]:
-        """One row per plot."""
+                 ref_mask: np.ndarray | None = None,
+                 variants: list[np.ndarray] | None = None) -> list[dict]:
+        """One row per plot.
+
+        ``variants`` are narrower/wider masks of the same frame; the spread of their
+        measurements gives the segmentation uncertainty (the path and region stay fixed).
+        """
         exp = self.experiment
         alignment = prepared.alignment
         frame_flags, frame_info = self._frame_flags(prepared)
@@ -523,11 +542,9 @@ class Analyzer:
             flags = list(frame_flags)
             path = self._measure_path(plot, mask, ref_mask, flags)
             reference = None if ref_mask is None else (ref_mask | mask)
-            if path is not None:
-                m = measure_along_path(mask, path, region, self.cfg.front_percentile,
-                                       self.cfg.measure.corridor_px, reference_mask=reference)
-            else:
-                m = _area_only(mask, region, reference)
+            m = self._measure_mask(mask, path, region, reference)
+            seg = _segmentation_spread(m, [self._measure_mask(v, path, region, None)
+                                           for v in variants or []])
             if m.target_px == 0:
                 flags.append("no_target")
 
@@ -551,11 +568,16 @@ class Analyzer:
                 "reference_covered_pct": "" if m.reference_covered_fraction is None
                 else _fmt(100 * m.reference_covered_fraction, 3),
                 "coverage_pct": _fmt(100 * m.coverage_fraction, 3),
+                "coverage_pct_unc": "" if seg is None or not m.roi_area_px
+                else _fmt(100 * seg.target_px / m.roi_area_px, 3),
+                "extent_px_seg_unc": _fmt(seg.extent_px, 3)
+                if seg is not None and path is not None else "",
                 **{k: _fmt(v, 5) for k, v in color_indices(prepared.frame, region).items()},
                 "flags": ";".join(flags),
-                "extent_mm": "", "extent_mm_unc": "", "extent_max_mm": "",
-                "axis_length_mm": "", "covered_length_mm": "", "reference_area_mm2": "",
-                "target_area_mm2": "", "roi_area_mm2": "", "equivalent_radius_mm": "",
+                "extent_mm": "", "extent_mm_unc": "", "extent_mm_seg_unc": "",
+                "extent_max_mm": "", "axis_length_mm": "", "covered_length_mm": "",
+                "reference_area_mm2": "", "target_area_mm2": "", "target_area_mm2_unc": "",
+                "roi_area_mm2": "", "equivalent_radius_mm": "",
                 "mask_file": mask_file, "overlay_file": "",
             }
             if self.scale is not None:
@@ -565,6 +587,9 @@ class Analyzer:
                     "reference_area_mm2": "" if m.reference_px is None
                     else _fmt(m.reference_px * k * k, 2),
                     "target_area_mm2": _fmt(area, 2),
+                    "target_area_mm2_unc": _fmt(area_uncertainty_mm2(
+                        m.target_px, k, self.scale.se_mm_per_px,
+                        None if seg is None else seg.target_px), 2),
                     "roi_area_mm2": _fmt(m.roi_area_px * k * k, 2),
                     "equivalent_radius_mm": _fmt(float(np.sqrt(area / np.pi)), 3),
                 })
@@ -574,7 +599,9 @@ class Analyzer:
                         "extent_mm_unc": _fmt(extent_uncertainty_mm(
                             m.extent_px, k, self.scale.se_mm_per_px,
                             None if alignment.rms_px is None
-                            else alignment.rms_px * self.align_px_factor), 3),
+                            else alignment.rms_px * self.align_px_factor,
+                            None if seg is None else seg.extent_px), 3),
+                        "extent_mm_seg_unc": "" if seg is None else _fmt(seg.extent_px * k, 3),
                         "extent_max_mm": _fmt(m.extent_max_px * k, 3),
                         "axis_length_mm": _fmt(m.path_length_px * k, 3),
                         "covered_length_mm": _fmt(m.covered_length_px * k, 3),
@@ -593,6 +620,29 @@ class Analyzer:
             for row in rows:
                 row["overlay_file"] = overlay_file
         return rows
+
+
+@dataclass
+class SegmentationSpread:
+    """Standard uncertainties (px) from how the mask changes under narrower/wider settings."""
+
+    extent_px: float
+    target_px: float
+
+
+def _segmentation_spread(nominal: ExtentMeasurement,
+                         variants: list[ExtentMeasurement]) -> SegmentationSpread | None:
+    """The nominal and variant values bound where the edge could be: treated as a
+    rectangular distribution over their range, u = (max - min) / (2 sqrt 3)."""
+    if not variants:
+        return None
+    every = [nominal, *variants]
+
+    def spread(values):
+        return (max(values) - min(values)) / (2 * math.sqrt(3))
+
+    return SegmentationSpread(extent_px=spread([m.extent_px for m in every]),
+                              target_px=spread([m.target_px for m in every]))
 
 
 def _area_only(mask: np.ndarray, region: np.ndarray,

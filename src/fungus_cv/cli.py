@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import sys
 from collections import Counter
 from datetime import datetime
@@ -738,11 +739,70 @@ def validate_cmd(
     typer.echo(f"  MAE {a.mae:.4f}  RMSE {a.rmse:.4f}  r {a.pearson_r:.4f}  "
                f"automatic = {a.slope:.4f} x hand {a.intercept:+.4f}")
     typer.echo(f"  largest difference {a.worst_diff:+.4f} at {a.worst_frame}")
+    if not math.isnan(a.within_2u):
+        typer.echo(f"  uncertainty check: {100 * a.within_2u:.0f}% of differences within 2u "
+                   f"(expect ~95%), RMS z {a.z_rms:.2f} (expect ~1)")
     if a.unmatched:
         typer.echo(f"  {len(a.unmatched)} hand row(s) not matched to analyzed frames: "
                    f"{', '.join(a.unmatched[:5])}")
     for f in a.files:
         typer.echo(f"wrote {f}")
+
+
+@app.command("validate-suite")
+def validate_suite_cmd(
+    suite: Path = typer.Argument(..., help="Suite YAML listing experiments, hand labels, models "
+                                 "and the accuracy each must reach."),
+    init: bool = typer.Option(False, "--init", help="Write an example suite file and exit."),
+    save_baseline: bool = typer.Option(False, help="Store this run's numbers as the baseline "
+                                       "that later runs are compared with (max_drift)."),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show every metric, not just "
+                                 "the checked ones."),
+) -> None:
+    """Re-run every accuracy check on hand-labeled real data; exit code 1 if any fails."""
+    from fungus_cv.analyze import suite as suite_mod
+
+    if init:
+        try:
+            suite_mod.write_template(suite)
+        except FileExistsError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(1) from exc
+        typer.echo(f"Wrote {suite}. Point it at your experiments, hand labels and models, then "
+                   "run this command without --init.")
+        return
+    _setup_logging()
+    try:
+        result = suite_mod.run_suite(
+            suite, progress=lambda case, check: typer.echo(f"running {case} / {check} ..."),
+            require_baseline=not save_baseline)
+    except (FileNotFoundError, ValueError) as exc:  # missing or invalid suite file
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+
+    for c in result.checks:
+        colour = typer.colors.GREEN if c.passed else typer.colors.RED
+        typer.secho(f"{'PASS' if c.passed else 'FAIL'}  {c.case} / {c.check}", fg=colour)
+        if c.error:
+            typer.echo(f"    error: {c.error}")
+        for m in c.metrics:
+            if m.status == "info" and not verbose:
+                continue
+            drift = "" if m.drift is None else f"  (baseline {m.baseline:.4g}, {m.drift:+.4g})"
+            detail = f"  <- {'; '.join(m.failures)}" if m.failures else ""
+            typer.echo(f"    {m.metric:28s} {m.value:10.4g}{drift}{detail}")
+        for note in c.notes:
+            typer.echo(f"    note: {note}")
+    if not result.baseline_found:
+        typer.echo("No baseline.json yet: run with --save-baseline once the results look right.")
+    typer.echo(f"wrote {result.out_dir}")
+    if save_baseline:
+        typer.echo(f"saved baseline {suite_mod.save_baseline(result, suite)}")
+    n_fail = sum(not c.passed for c in result.checks)
+    typer.secho(f"{len(result.checks) - n_fail}/{len(result.checks)} checks passed",
+                fg=typer.colors.GREEN if not n_fail else typer.colors.RED)
+    if n_fail:
+        raise typer.Exit(1)
 
 
 # --- training your own models --------------------------------------------------------------

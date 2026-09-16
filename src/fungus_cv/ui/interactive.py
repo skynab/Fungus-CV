@@ -277,3 +277,109 @@ def prompt_target(image: np.ndarray, frame_file: str, preview=None,
                 return prompt
     finally:
         cv2.destroyWindow(view.window)
+
+
+def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False) -> dict:
+    """Brush editor for dataset masks. Saving an item marks it reviewed.
+
+    Returns counts of saved and skipped items.
+    """
+    items = [i for i in dataset.items if not (only_unreviewed and i.reviewed)]
+    if not items:
+        return {"saved": 0, "shown": 0}
+    window = "fungus label"
+    cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)
+    idx = max(0, min(start, len(items) - 1))
+    counts = {"saved": 0, "shown": 0}
+    brush = 8
+    state: dict = {}
+
+    def load(i: int) -> None:
+        item = items[i]
+        image = dataset.load_image(item)
+        state.update(item=item, image=image, mask=dataset.load_mask(item),
+                     undo=[], view=_View(image, window), painting=0, dirty=False,
+                     show_mask=True)
+        counts["shown"] += 1
+        cv2.setMouseCallback(window, on_mouse)
+
+    def paint(x: int, y: int, value: bool) -> None:
+        fx, fy = state["view"].to_full(x, y)
+        radius = max(1, int(round(brush / state["view"].scale)))
+        m = state["mask"].astype(np.uint8)
+        cv2.circle(m, (int(round(fx)), int(round(fy))), radius, 1 if value else 0, -1)
+        state["mask"] = m.astype(bool)
+        state["dirty"] = True
+
+    def on_mouse(event, x, y, flags, param):
+        state["view"].mouse = (x, y)
+        if event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_RBUTTONDOWN):
+            state["undo"].append(state["mask"].copy())
+            state["undo"] = state["undo"][-30:]
+            state["painting"] = 1 if event == cv2.EVENT_LBUTTONDOWN else -1
+            paint(x, y, state["painting"] > 0)
+        elif event == cv2.EVENT_MOUSEMOVE and state["painting"]:
+            paint(x, y, state["painting"] > 0)
+        elif event in (cv2.EVENT_LBUTTONUP, cv2.EVENT_RBUTTONUP):
+            state["painting"] = 0
+
+    def save() -> None:
+        item = state["item"]
+        dataset.write_mask(item, state["mask"])
+        item.reviewed = True
+        dataset.save()
+        state["dirty"] = False
+        counts["saved"] += 1
+
+    load(idx)
+    try:
+        while True:
+            view = state["view"]
+            canvas = view.base.copy()
+            if state["show_mask"]:
+                size = (canvas.shape[1], canvas.shape[0])
+                small = cv2.resize(state["mask"].astype(np.uint8), size,
+                                   interpolation=cv2.INTER_NEAREST).astype(bool)
+                tint = canvas.copy()
+                tint[small] = (255, 0, 255)
+                canvas = cv2.addWeighted(tint, 0.4, canvas, 0.6, 0)
+                edges = cv2.morphologyEx(small.astype(np.uint8), cv2.MORPH_GRADIENT,
+                                         np.ones((3, 3), np.uint8)).astype(bool)
+                canvas[edges] = (255, 0, 255)
+            cv2.circle(canvas, view.mouse, brush, (255, 255, 255), 1)
+            view.magnifier(canvas)
+            item = state["item"]
+            status = "reviewed" if item.reviewed else "NOT reviewed"
+            unsaved = "  *unsaved*" if state["dirty"] else ""
+            view.show(canvas, [
+                f"{idx + 1}/{len(items)}  {item.id}  [{status}]{unsaved}",
+                "Left drag: paint target   Right drag: erase   [ ]: brush size   z: undo",
+                "t: toggle mask   s: save (marks reviewed)   a/d: prev/next (saves)   Esc: quit",
+            ])
+
+            key = cv2.waitKey(15) & 0xFF
+            if key == ESC:
+                if state["dirty"]:
+                    save()
+                break
+            if key == ord("["):
+                brush = max(1, brush - 2)
+            elif key == ord("]"):
+                brush = min(200, brush + 2)
+            elif key == ord("z") and state["undo"]:
+                state["mask"] = state["undo"].pop()
+                state["dirty"] = True
+            elif key == ord("t"):
+                state["show_mask"] = not state["show_mask"]
+            elif key == ord("s"):
+                save()
+            elif key in (ord("a"), ord("d")):
+                if state["dirty"]:
+                    save()
+                step = 1 if key == ord("d") else -1
+                if 0 <= idx + step < len(items):
+                    idx += step
+                    load(idx)
+    finally:
+        cv2.destroyWindow(window)
+    return counts

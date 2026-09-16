@@ -157,7 +157,7 @@ class Analyzer:
         try:
             self.segmenter = build_segmenter(self.cfg.target, experiment.root,
                                              self.annotations.roi)
-        except (ValueError, RuntimeError) as exc:  # missing prompts, missing torch, ...
+        except (ValueError, RuntimeError, OSError) as exc:  # missing prompts, model, torch
             raise AnalysisError(str(exc)) from exc
         analysis_settings = self.cfg.model_dump(mode="json")
         analysis_settings["target"] = self.cfg.target.selected()

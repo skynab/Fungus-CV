@@ -56,4 +56,8 @@ def build_segmenter(target_config, experiment_root=None, roi=None):
         from fungus_cv.segment.sam2 import Sam2VideoSegmenter
 
         return Sam2VideoSegmenter.from_config(target_config.sam2, experiment_root, roi)
+    if target_config.method == "model":
+        from fungus_cv.segment.trained import TrainedModelSegmenter
+
+        return TrainedModelSegmenter.from_config(target_config.model, experiment_root, roi)
     raise ValueError(f"unknown segmentation method {target_config.method!r}")

@@ -155,12 +155,28 @@ class Sam2TargetConfig(BaseModel):
     min_blob_area_px: int = Field(0, ge=0)
 
 
+class ModelTargetConfig(BaseModel):
+    """A segmentation model trained with `fungus train`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = ""  # model folder; absolute, or relative to the experiment or current folder
+    device: Literal["auto", "cuda", "mps", "cpu"] = "auto"
+    crop_to_roi: bool = True
+    crop_margin_px: int = Field(32, ge=0)
+    threshold: float | None = Field(None, gt=0, lt=1)  # None = value tuned during training
+    tile_px: int = Field(512, ge=64)
+    overlap_px: int = Field(64, ge=0)
+    min_blob_area_px: int = Field(0, ge=0)
+
+
 class TargetConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    method: Literal["color", "sam2"] = "color"
+    method: Literal["color", "sam2", "model"] = "color"
     color: ColorTargetConfig = Field(default_factory=ColorTargetConfig)
     sam2: Sam2TargetConfig = Field(default_factory=Sam2TargetConfig)
+    model: ModelTargetConfig = Field(default_factory=ModelTargetConfig)
 
     def selected(self) -> dict:
         """Only the active method's settings; used for the results settings hash."""
@@ -266,7 +282,7 @@ analysis:
     dictionary: DICT_4X4_50   # must match the printed sheet (`fungus markers`)
     size_mm: null         # black square edge as printed, measured with a ruler, e.g. 30.0
   target:
-    method: color         # color | sam2 (sam2 needs: pip install -e ".[sam]")
+    method: color         # color | sam2 | model (sam2 and model need: pip install -e ".[sam]")
     color:
       hsv_ranges:         # OpenCV HSV (H 0-179). Measure yours with `fungus pick-color`
         - lower: [95, 60, 30]
@@ -281,6 +297,15 @@ analysis:
       crop_to_roi: true   # give SAM more pixels on the object (more precise edges)
       crop_margin_px: 32
       mask_threshold: 0.0 # >0 tighter masks, <0 looser
+      min_blob_area_px: 0
+    model:
+      path: ""            # folder written by `fungus train`, e.g. ../../models/moss-bark-v1
+      device: auto
+      crop_to_roi: true
+      crop_margin_px: 32
+      threshold: null     # null = threshold tuned on validation data during training
+      tile_px: 512        # large frames are processed in overlapping tiles
+      overlap_px: 64
       min_blob_area_px: 0
   front_percentile: 50    # front across the width: 50 = median, 100 = highest point
   save_masks: true

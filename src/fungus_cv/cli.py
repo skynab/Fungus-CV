@@ -568,5 +568,209 @@ def compare(
                f"sd {r.extent_diff_sd:.3f} {r.extent_unit}")
     typer.echo(f"wrote {r.csv_path}")
 
+
+# --- training your own models --------------------------------------------------------------
+
+dataset_app = typer.Typer(help="Build labeled datasets for training models.", no_args_is_help=True)
+app.add_typer(dataset_app, name="dataset")
+
+
+@dataset_app.command("export")
+def dataset_export(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    dataset: Path = typer.Argument(..., help="Dataset folder (created if missing)."),
+    run: str | None = typer.Option(None, help="Run id/prefix whose masks to start from "
+                                   "(default: newest run; see `fungus runs`)."),
+    count: int = typer.Option(20, help="How many frames, spread evenly over time."),
+    full_frame: bool = typer.Option(False, help="Export whole frames instead of the region."),
+    group: str | None = typer.Option(None, help="Group name (default: experiment name). "
+                                     "Validation never mixes groups with training."),
+) -> None:
+    """Copy frames and their masks into a dataset, to be corrected with `fungus label`."""
+    from fungus_cv.analyze.compare import list_runs
+    from fungus_cv.analyze.pipeline import AnalysisError
+    from fungus_cv.learn.dataset import Dataset
+    from fungus_cv.learn.export import export_from_run
+
+    exp = _load_experiment(experiment)
+    _setup_logging()
+    if run is None:
+        found = list_runs(exp)
+        if not found:
+            typer.secho("no analysis runs yet; run `fungus analyze` first", fg=typer.colors.RED,
+                        err=True)
+            raise typer.Exit(1)
+        run = found[-1].run_id
+    ds = Dataset.open_or_create(dataset)
+    try:
+        added = export_from_run(exp, ds, run, count=count, crop_to_roi=not full_frame,
+                                group=group)
+    except (AnalysisError, ValueError, FileNotFoundError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Added {len(added)} item(s) from run {run} to {ds.root} "
+               f"({len(ds.items)} total). Next: `fungus label {ds.root}`")
+
+
+@dataset_app.command("add-pairs")
+def dataset_add_pairs(
+    dataset: Path = typer.Argument(..., help="Dataset folder (created if missing)."),
+    images: Path = typer.Argument(..., exists=True, file_okay=False),
+    masks: Path = typer.Argument(..., exists=True, file_okay=False,
+                                 help="Masks with the same file names; non-zero = target."),
+    group: str = typer.Option(..., help="Group name, e.g. where the images came from."),
+    reviewed: bool = typer.Option(False, help="Mark as already checked by a person."),
+) -> None:
+    """Add images with masks made elsewhere (e.g. CVAT, Label Studio, GIMP)."""
+    from fungus_cv.learn.dataset import Dataset
+    from fungus_cv.learn.export import add_pairs
+
+    _setup_logging()
+    ds = Dataset.open_or_create(dataset)
+    added = add_pairs(ds, images, masks, group, reviewed)
+    typer.echo(f"Added {len(added)} item(s) ({len(ds.items)} total)")
+
+
+@dataset_app.command("info")
+def dataset_info(dataset: Path = typer.Argument(..., help="Dataset folder.")) -> None:
+    """Show items per group and how many are reviewed."""
+    from fungus_cv.learn.dataset import Dataset
+    from fungus_cv.learn.export import dataset_stats
+
+    try:
+        ds = Dataset.open(dataset)
+    except FileNotFoundError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{ds.name}: {len(ds.items)} item(s), "
+               f"{sum(i.reviewed for i in ds.items)} reviewed")
+    for group, st in sorted(dataset_stats(ds).items()):
+        typer.echo(f"  {group or '(no group)'}: {st['items']} items, {st['reviewed']} reviewed, "
+                   f"target covers {st['mean_target_pct']}% on average")
+
+
+@app.command()
+def label(
+    dataset: Path = typer.Argument(..., help="Dataset folder."),
+    unreviewed: bool = typer.Option(False, help="Only show items not yet reviewed."),
+    start: int = typer.Option(0, help="Item number to start at."),
+) -> None:
+    """Correct masks with a brush; saving marks an item as reviewed."""
+    from fungus_cv.learn.dataset import Dataset
+    from fungus_cv.ui.interactive import edit_labels
+
+    try:
+        ds = Dataset.open(dataset)
+    except FileNotFoundError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    counts = edit_labels(ds, start=start, only_unreviewed=unreviewed)
+    typer.echo(f"Saved {counts['saved']} item(s); "
+               f"{sum(i.reviewed for i in ds.items)}/{len(ds.items)} reviewed")
+
+
+@app.command("train")
+def train_cmd(
+    dataset: Path = typer.Argument(..., help="Dataset folder."),
+    output: Path = typer.Argument(..., help="New folder for the trained model."),
+    encoder: str = typer.Option("resnet34", help="resnet18 (faster) | resnet34"),
+    steps: int = typer.Option(3000, help="Training steps (batches)."),
+    batch_size: int = typer.Option(8),
+    patch_px: int = typer.Option(384, help="Training patch size in pixels."),
+    learning_rate: float = typer.Option(3e-4),
+    val_group: list[str] = typer.Option([], help="Group(s) to hold out for validation "
+                                        "(repeatable). Default: chosen automatically."),
+    include_unreviewed: bool = typer.Option(False, help="Also train on unreviewed masks."),
+    flip_vertical: bool = typer.Option(False, help="Allow upside-down augmentation."),
+    rotate90: bool = typer.Option(False, help="Allow 90-degree rotation augmentation."),
+    color_jitter: float = typer.Option(1.0, help="Scale colour/brightness augmentation "
+                                       "(0 = none, 2 = double)."),
+    pretrained: bool = typer.Option(True, help="Start from ImageNet weights."),
+    device: str = typer.Option("auto", help="auto | cuda | mps | cpu"),
+    seed: int = typer.Option(0),
+) -> None:
+    """Train a segmentation model; writes model.pt and a model.json card."""
+    from fungus_cv.learn.dataset import Dataset
+    from fungus_cv.learn.train import TrainConfig, train
+
+    _setup_logging()
+    try:
+        ds = Dataset.open(dataset)
+    except FileNotFoundError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    base = TrainConfig()
+    cfg = TrainConfig(
+        encoder=encoder, pretrained=pretrained, patch_px=patch_px, batch_size=batch_size,
+        steps=steps, eval_every=max(1, min(base.eval_every, steps // 4 or 1)),
+        learning_rate=learning_rate, val_groups=list(val_group),
+        reviewed_only=not include_unreviewed, flip_vertical=flip_vertical, rotate90=rotate90,
+        brightness_jitter=base.brightness_jitter * color_jitter,
+        contrast_jitter=base.contrast_jitter * color_jitter,
+        hue_jitter_deg=base.hue_jitter_deg * color_jitter,
+        saturation_jitter=base.saturation_jitter * color_jitter,
+        device=device, seed=seed,
+    )
+    try:
+        result = train(ds, output, cfg)
+    except (ValueError, FileExistsError, RuntimeError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Trained on {result.n_train} item(s), validated on {result.n_val} "
+               f"({result.split}) in {result.seconds / 60:.1f} min")
+    if result.val_metrics:
+        v = result.val_metrics
+        typer.echo(f"  validation IoU mean {v['iou_mean']:.4f} (min {v['iou_min']:.4f}), "
+                   f"boundary F1@2px {v['boundary_f1_2px_mean']:.4f}, "
+                   f"threshold {result.threshold}")
+    else:
+        typer.echo("  no validation data: the model is unchecked; use `fungus evaluate`")
+    typer.echo(f"Wrote {result.out_dir}. Use it with analysis.target.method: model and "
+               f"analysis.target.model.path: {result.out_dir}")
+
+
+@app.command()
+def evaluate(
+    model: Path = typer.Argument(..., help="Model folder from `fungus train`."),
+    dataset: Path = typer.Argument(..., help="Labeled dataset to test on."),
+    include_unreviewed: bool = typer.Option(False),
+    threshold: float | None = typer.Option(None, help="Override the tuned threshold."),
+    device: str = typer.Option("auto"),
+) -> None:
+    """Measure a model against labeled masks (IoU, Dice, precision, recall, boundary F1)."""
+    import csv
+
+    from fungus_cv.learn.dataset import Dataset
+    from fungus_cv.learn.train import evaluate_model
+
+    _setup_logging()
+    try:
+        ds = Dataset.open(dataset)
+        rows, summary = evaluate_model(model, ds, not include_unreviewed, device, threshold)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    if not rows:
+        typer.secho("no items to evaluate (none reviewed?)", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    out = model / f"evaluation_{ds.name}.csv"
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    typer.echo(f"threshold {summary['threshold']}")
+    for label_, key in (("all items", "all"), ("not used for training", "not_in_training_set")):
+        st = summary[key]
+        if st["n"]:
+            typer.echo(f"  {label_} (n={st['n']}): IoU {st['iou_mean']:.4f} "
+                       f"(min {st['iou_min']:.4f})  Dice {st['dice_mean']:.4f}  "
+                       f"precision {st['precision_mean']:.4f}  recall {st['recall_mean']:.4f}  "
+                       f"boundary F1@2px {st['boundary_f1_2px_mean']:.4f}")
+        else:
+            typer.echo(f"  {label_}: none")
+    if summary["all"]["n"] and not summary["not_in_training_set"]["n"]:
+        typer.echo("  Warning: every item was used in training; these numbers are optimistic.")
+    typer.echo(f"wrote {out}")
+
 if __name__ == "__main__":
     app()

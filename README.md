@@ -2,7 +2,7 @@
 
 Take time-lapse photos with a webcam, then measure how a spreading region (dye, moss, an infection) moves relative to a reference object over time. See [PLAN.md](PLAN.md) for the full roadmap.
 
-**Status:** capture (M1), color-threshold measurement (M2) and SAM 2 segmentation (M3) all work. Trainable per-use-case models (M7) come next.
+**Status:** capture (M1), color-threshold measurement (M2), SAM 2 segmentation (M3) and training your own models (M7) all work.
 
 Works on Windows, macOS and Linux (Python 3.10+).
 
@@ -111,6 +111,39 @@ fungus compare experiments/moss-1    # IoU and extent difference between the two
   - New frames re-run tracking from the prompted frame, so each `analyze` gets slower as the run grows (minutes for a few hundred frames).
 - **Validating:** `fungus compare` accepts any folder of mask PNGs, not just runs. Use it to check SAM against hand-labeled frames before trusting it on a new kind of scene. On synthetic dye, SAM 2-small matched the color threshold with mean IoU 0.991 and read the front **0.21 mm lower** on average; check for similar systematic offsets on real images.
 - **Tests:** tests that load the real model run only with `FUNGUS_TEST_SAM=1`.
+
+## Training your own model for a new use case
+
+When a color threshold isn't reliable and SAM needs too much clicking, train a model on examples of your target: moss on bark, discolored leaves, a field's coloring. The loop:
+
+```bash
+# 1. Start labels from any analysis run (SAM or color): frames spread evenly over time
+fungus dataset export experiments/moss-1 datasets/moss-bark --count 30
+fungus dataset export experiments/moss-2 datasets/moss-bark --count 30   # more experiments = better
+fungus dataset add-pairs datasets/moss-bark photos/ masks/ --group field-2026   # masks made elsewhere
+
+# 2. Correct the masks: left drag paints, right drag erases; saving marks an item reviewed
+fungus label datasets/moss-bark --unreviewed
+fungus dataset info datasets/moss-bark
+
+# 3. Train (GPU if available) and check on data the model has not seen
+fungus train datasets/moss-bark models/moss-bark-v1
+fungus evaluate models/moss-bark-v1 datasets/moss-bark-test
+
+# 4. Use it: analysis.target.method: model, analysis.target.model.path: <model folder>
+fungus analyze experiments/moss-3
+```
+
+- **Model:** a U-Net with an ImageNet-pretrained ResNet encoder (`resnet34` by default, `resnet18` is faster). It has a full-resolution path so mask edges aren't blurred. Large frames are processed in overlapping tiles.
+- **Training data:** only **reviewed** labels are used by default, so model quality depends on labels a person checked. `--include-unreviewed` overrides this.
+- **Validation without leakage:** consecutive time-lapse frames are near-duplicates, so validation never mixes them with training.
+  - Whole groups (experiments) are held out.
+  - With one group, the latest frames are held out.
+  - `--val-group` chooses the groups explicitly.
+- **Augmentation:** horizontal flips, scale, and small color and brightness changes. Upside-down flips and rotation are off by default, because growth direction often matters; `--flip-vertical` and `--rotate90` turn them on. Raise `--color-jitter` if lighting varies a lot.
+- **Model card:** `model.json` records the dataset fingerprint (a hash of every image and mask), the exact train/validation items, the training settings and history, and validation metrics. The threshold is tuned on validation data, which also picks the best checkpoint, so **report accuracy from `fungus evaluate` on separate labeled data**. The analysis settings hash includes the model's weights hash, so results from different models are never mixed.
+- **Metrics:** `fungus evaluate` reports IoU, Dice, precision, recall and **boundary F1 within 2 px** (how accurately edges are placed, which matters for front-position measurements) for items used in training and items not used in training, separately.
+- **Time:** on an M1 Pro, 100 steps of `resnet18` at 256 px took about 25 s. Real datasets will want the default 3000 steps: tens of minutes on a GPU, much longer on a CPU.
 
 ## What an experiment folder contains
 

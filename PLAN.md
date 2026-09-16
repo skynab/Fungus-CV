@@ -149,7 +149,7 @@ Moss and dye spread gradually, so the timeline is used as a check: flag any fram
 | M4 | **Robustness**: registration, lighting check, bad-frame skipping, jump detection, overlay video | Bumping the camera or turning a lamp on mid-run does not create fake growth |
 | M5 | **Moss on a plant**: stem skeleton axis, soil-line base, % of stem, logistic fit | Matches hand measurements on ~20 hand-labeled frames |
 | M6 | **Field mode**: 4-marker top-down view, coverage and edge advance, multiple plots per image | Area error < ~10% against hand-drawn outlines |
-| M7 (core, can be started after M3) | **Trainable detectors:** a labeling workflow (start from SAM masks, correct them by hand), fine-tune a small segmentation model for each use case, keep versioned models; optional Streamlit dashboard | Beats SAM alone on held-out moss frames; a new use case can be trained from a set of labeled images |
+| M7 🟡 (core, can be started after M3) | **Trainable detectors:** a labeling workflow (start from SAM masks, correct them by hand), fine-tune a small segmentation model for each use case, keep versioned models; optional Streamlit dashboard | Beats SAM alone on held-out moss frames; a new use case can be trained from a set of labeled images *(workflow done: dataset export/add-pairs, brush label editor, U-Net training with group/time-aware validation, model cards, evaluate, `method: model`. Verified end to end on synthetic dye only; needs real labeled moss. Dashboard not started)* |
 
 ---
 

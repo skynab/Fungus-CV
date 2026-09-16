@@ -313,10 +313,14 @@ def markers(
 
 
 @app.command()
-def annotate(experiment: Path = typer.Argument(..., help="Experiment folder.")) -> None:
+def annotate(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    field: bool = typer.Option(False, "--field", help="Outline field plots instead of a "
+                               "base/tip/region (plots are named plot1, plot2, ...)."),
+) -> None:
     """Click the base, tip and region to measure on the reference (first) frame."""
     from fungus_cv.analyze.pipeline import AnalysisError, Analyzer, annotations_path
-    from fungus_cv.ui.interactive import Cancelled
+    from fungus_cv.ui.interactive import Cancelled, annotate_field
     from fungus_cv.ui.interactive import annotate as run_annotate
 
     exp = _load_experiment(experiment)
@@ -328,12 +332,18 @@ def annotate(experiment: Path = typer.Argument(..., help="Experiment folder.")) 
         raise typer.Exit(1) from exc
     row, image = analyzer.reference_row, analyzer.reference
     try:
-        ann = run_annotate(image, reference_file=row["file"])
+        tool = annotate_field if field else run_annotate
+        ann = tool(image, reference_file=row["file"])
     except Cancelled:
         typer.echo("Cancelled; nothing saved.")
         raise typer.Exit(1) from None
     path = annotations_path(exp)
     ann.save(path)
+    if ann.plots:
+        typer.echo(f"Saved {path} with plots {[p.name for p in ann.plots]}"
+                   f"{', with neutral patch' if ann.reference_patch else ''}. Rename plots "
+                   "by editing the names in the file.")
+        return
     kind = f"path through {len(ann.path)} points" if ann.path else "straight axis"
     typer.echo(f"Saved {path} ({kind}, {ann.polyline().length:.1f} px"
                f"{', with neutral patch' if ann.reference_patch else ''})")
@@ -434,38 +444,44 @@ def report(
     video: bool = typer.Option(False, help="Also write an overlay time-lapse video."),
     exclude_jumps: bool = typer.Option(False, help="Leave frames that jump off the local "
                                        "trend out of the fits (they are always marked)."),
+    plot: list[str] = typer.Option([], help="Plot(s) to report (repeatable). Default: all."),
 ) -> None:
-    """Fit growth models and write plots to results/report/."""
-    from fungus_cv.analyze.report import DEFAULT_EXCLUDE, make_report
+    """Fit growth models and write plots to results/report/ (one folder per field plot)."""
+    from fungus_cv.analyze.report import DEFAULT_EXCLUDE, list_plots, make_report
 
     exp = _load_experiment(experiment)
     _setup_logging()
     if t0 is not None and t0.tzinfo is None:
         t0 = t0.astimezone()
     try:
-        result = make_report(
+        plots = list(plot) or list_plots(exp)
+        results = [make_report(
             exp, metric=metric, t0=t0, time_unit=time_unit,
             exclude_flags=() if include_flagged else DEFAULT_EXCLUDE, video=video,
-            exclude_jumps=exclude_jumps,
-        )
+            exclude_jumps=exclude_jumps, plot=name,
+        ) for name in plots]
     except (FileNotFoundError, ValueError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
 
-    typer.echo(f"{result.metric}: {result.n_used} frames used, {result.n_excluded} excluded, "
-               f"{result.retreats} retreat(s) and {result.jumps} jump(s) to check "
-               f"(see frame_flags.csv); time in {result.time_unit}")
-    ok = [f for f in result.fits if f.ok]
-    best_aic = min((f.aic for f in ok), default=None)
-    for fit in result.fits:
-        if not fit.ok:
-            typer.echo(f"  {fit.model:9s} failed: {fit.message}")
-            continue
-        params = ", ".join(f"{k}={v:.4g}±{fit.stderr[k]:.2g}" for k, v in fit.params.items())
-        best = "  <- lowest AIC" if fit.aic == best_aic else ""
-        typer.echo(f"  {fit.model:9s} {params}  R²={fit.r2:.4f}  AIC={fit.aic:.1f}{best}")
-    for f in result.files:
-        typer.echo(f"wrote {f}")
+    for result in results:
+        where = "" if result.plot == "main" else f"[{result.plot}] "
+        typer.echo(f"{where}{result.metric}: {result.n_used} frames used, "
+                   f"{result.n_excluded} excluded, {result.retreats} retreat(s) and "
+                   f"{result.jumps} jump(s) to check (see frame_flags.csv); "
+                   f"time in {result.time_unit}")
+        ok = [f for f in result.fits if f.ok]
+        best_aic = min((f.aic for f in ok), default=None)
+        for fit in result.fits:
+            if not fit.ok:
+                typer.echo(f"  {fit.model:9s} failed: {fit.message}")
+                continue
+            params = ", ".join(f"{k}={v:.4g}±{fit.stderr[k]:.2g}"
+                               for k, v in fit.params.items())
+            best = "  <- lowest AIC" if fit.aic == best_aic else ""
+            typer.echo(f"  {fit.model:9s} {params}  R²={fit.r2:.4f}  AIC={fit.aic:.1f}{best}")
+        for f in result.files:
+            typer.echo(f"wrote {f}")
 
 
 def _pick_frame_index(frames: list[dict], frame: str) -> int:
@@ -585,6 +601,7 @@ def validate_cmd(
     hand_csv: Path = typer.Argument(..., help="CSV with columns frame and value (see "
                                     "--make-template)."),
     metric: str = typer.Option("extent_mm", help="Measurement column to compare."),
+    plot: str | None = typer.Option(None, help="Only this plot (field experiments)."),
     make_template: int = typer.Option(0, help="Instead of validating, write HAND_CSV with this "
                                       "many evenly spaced frames to measure by hand."),
 ) -> None:
@@ -601,7 +618,7 @@ def validate_cmd(
                        f"units as {metric}), fill in 'value', then run this command again "
                        "without --make-template.")
             return
-        a = validate(exp, hand_csv, metric)
+        a = validate(exp, hand_csv, metric, plot)
     except (ValueError, FileNotFoundError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc

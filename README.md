@@ -2,7 +2,7 @@
 
 Take time-lapse photos with a webcam, then measure how a spreading region (dye, moss, an infection) moves relative to a reference object over time. See [PLAN.md](PLAN.md) for the full roadmap.
 
-**Status:** capture (M1), color-threshold measurement (M2), SAM 2 segmentation (M3), robustness to tilt/lighting/jumps (M4), measuring along curved stems (M5) and training your own models (M7) all work. Field coverage (M6) is next.
+**Status:** capture (M1), color-threshold measurement (M2), SAM 2 segmentation (M3), robustness to tilt/lighting/jumps (M4), measuring along curved stems (M5), field plots (M6) and training your own models (M7) all work. Field plots (M6) work too.
 
 Works on Windows, macOS and Linux (Python 3.10+).
 
@@ -84,6 +84,34 @@ It outputs parameters ± standard errors, R², and AIC (lower AIC = better model
 - Markers must lie in the same plane as the object, and the camera should face that plane square-on. The analysis warns if marker edges disagree by more than 2%, which suggests a tilted view.
 - Set `--t0` to the moment the towel touched the dye. Otherwise t = 0 is the first photo.
 - The dye-edge position depends on the color thresholds. To estimate that uncertainty, re-run with slightly wider and narrower `hsv_ranges` and compare. Archived results make this easy.
+
+## Field plots: coverage, spread and colour
+
+For a field (or a bench of pots) seen by one camera:
+
+```bash
+fungus markers markers.pdf --size-mm 100 --ids 0,1,2,3   # larger markers for a wide view
+# Stake the 4 markers flat on the ground around the plots, visible in every photo.
+# config.yaml: markers.size_mm, rectify.enabled: true, lighting.method: patch (or background)
+fungus annotate experiments/field-1 --field     # outline each plot: plot1, plot2, ...
+fungus pick-color experiments/field-1            # or SAM / a trained model for the patches
+fungus analyze experiments/field-1
+fungus report experiments/field-1 --metric target_area_mm2          # one folder per plot
+fungus report experiments/field-1 --metric edge_advance_p95_mm --plot plot1
+fungus report experiments/field-1 --metric gcc_p90                  # greenness, no segmentation
+```
+
+- **Top-down view:** with 4 markers and `rectify.enabled: true`, the field is measured as if seen from directly above, so areas are in true mm². Without rectification a single scale is wrong across a tilted view; the synthetic test was off by about 9%.
+- **One row per plot per frame** in `measurements.csv` (`plot` column). Plots are named `plot1`, `plot2`, … by `annotate --field`; rename them in `annotations.json`. A plot can also carry its own `base`/`tip`/`path` to measure extent inside it.
+- **Per-plot columns:** `target_area_mm2`, `coverage_pct`, `equivalent_radius_mm` (radius of a circle of the same area; useful for radial growth rates).
+- **Colour indices,** computed for every plot on the lighting-corrected frame. These track whole-field greenness or discolouration without any segmentation:
+  - `gcc_mean`, `gcc_p90` (green chromatic coordinate; its 90th percentile is the standard robust summary in phenology camera studies)
+  - `rcc_mean`, the red chromatic coordinate
+  - `exg_mean`, excess green
+- **Edge advance** (`report --metric edge_advance_p95_mm` or `edge_advance_max_mm`): how far newly affected ground is from the patch's first outline, i.e. the first usable frame with any patch in the plot. It's computed from the saved masks, so it works for any segmentation method.
+- **Reports and validation:** `report` writes `results/report/<plot>/` for each plot. `validate --make-template` writes one row per plot per frame, and `--plot` restricts the check to one plot, e.g. to compare areas with outlines traced by hand in ImageJ.
+
+On a synthetic tilted field with two plots and irregular growing patches, rectified areas were within **+0.9 to +2.7%** of the true outlines (the plan's target was <10%). Errors were largest for the smallest patches, where edge pixels matter most.
 
 ## Moss on a plant stem (curved objects)
 
@@ -219,7 +247,7 @@ experiments/dye-test-1/
   frames/         # 2026-09-20T14-05-00.123Z_cam0.png ... (UTC time, sorts in time order)
   frames.csv      # one row per image or failed attempt (see below)
   capture.log
-  annotations.json  # base, path to tip, region, optional neutral patch (`fungus annotate`)
+  annotations.json  # base, path to tip, region or field plots, neutral patch (`fungus annotate`)
   prompts.json    # SAM clicks (from `fungus prompt`)
   results/        # measurements.csv, run_info.json, report/, archive/,
                   # masks/<run>/, overlays/<run>/, runs/<run>.json, compare/

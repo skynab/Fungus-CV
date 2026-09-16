@@ -17,8 +17,9 @@ import numpy as np
 
 from fungus_cv import __version__
 from fungus_cv.measure.centerline import CenterlineError, centerline_from_mask
+from fungus_cv.measure.color_indices import color_indices
 from fungus_cv.measure.geometry import ANNOTATIONS_NAME, Annotations, extent_uncertainty_mm
-from fungus_cv.measure.path import Polyline, measure_along_path
+from fungus_cv.measure.path import ExtentMeasurement, Polyline, measure_along_path
 from fungus_cv.preprocess.align import ECC_POOR, Alignment, align_frame
 from fungus_cv.preprocess.lighting import LightingNormalizer, LightingResult
 from fungus_cv.preprocess.markers import Scale, detect_markers, scale_from_markers
@@ -34,14 +35,15 @@ MEASUREMENTS_NAME = "measurements.csv"
 RUN_INFO_NAME = "run_info.json"
 
 MEASUREMENT_FIELDS = [
-    "timestamp_utc", "frame_file", "camera", "settings_hash",
+    "timestamp_utc", "frame_file", "camera", "plot", "settings_hash",
     "align_method", "align_rms_px", "align_ecc", "align_scale", "align_shift_px",
     "target_px", "front_width_px", "extent_px", "extent_max_px", "extent_fraction",
     "path_length_px", "covered_length_px", "covered_length_pct",
     "reference_px", "reference_covered_pct",
     "extent_mm", "extent_mm_unc", "extent_max_mm", "axis_length_mm", "covered_length_mm",
     "reference_area_mm2",
-    "target_area_mm2", "roi_area_mm2", "coverage_pct",
+    "target_area_mm2", "roi_area_mm2", "coverage_pct", "equivalent_radius_mm",
+    "gcc_mean", "gcc_p90", "rcc_mean", "exg_mean",
     "mean_brightness", "sharpness", "light_gain_b", "light_gain_g", "light_gain_r",
     "flags", "mask_file", "overlay_file",
 ]
@@ -219,8 +221,10 @@ class Analyzer:
             raise AnalysisError("measure.path_source: reference needs analysis.reference.method "
                                 "(color, sam2 or model) to segment the stem in each frame")
         self.roi = self.annotations.roi_mask(self.reference.shape)
-        self.static_path = (self.annotations.polyline() if measure.mode == "path"
-                            else Polyline([self.annotations.base, self.annotations.tip]))
+        self.plots = self.annotations.measured_plots()
+        self.plot_masks = {p.name: p.mask(self.reference.shape) for p in self.plots}
+        self.static_paths = {p.name: p.polyline(follow_path=measure.mode == "path")
+                             for p in self.plots if p.has_axis}
         try:
             self.segmenter = build_segmenter(self.cfg.target, experiment.root,
                                              self.annotations.roi)
@@ -322,11 +326,12 @@ class Analyzer:
             if self.reference_segmenter is not None:
                 ref_img = cv2.imread(str(self._reference_mask_path(i)), cv2.IMREAD_GRAYSCALE)
                 ref_mask = None if ref_img is None else ref_img > 127
-            row = self._measure(self.frames[i], prepared, mask, ref_mask)
-            self._append(row)
+            rows = self._measure(self.frames[i], prepared, mask, ref_mask)
+            for row in rows:
+                self._append(row)
+                for flag in filter(None, row["flags"].split(";")):
+                    summary.flagged[flag] += 1
             summary.processed += 1
-            for flag in filter(None, row["flags"].split(";")):
-                summary.flagged[flag] += 1
         return summary
 
     def _reference_mask_path(self, index: int) -> Path:
@@ -427,41 +432,35 @@ class Analyzer:
                 raise AnalysisError(f"lighting correction failed: {exc}") from exc
         return Prepared(image, frame, alignment, lighting)
 
-    def _measure_path(self, mask: np.ndarray, ref_mask: np.ndarray | None,
-                      flags: list[str]) -> Polyline:
+    def _measure_path(self, plot, mask: np.ndarray, ref_mask: np.ndarray | None,
+                      flags: list[str]) -> Polyline | None:
+        if not plot.has_axis:
+            return None
+        static = self.static_paths[plot.name]
         measure = self.cfg.measure
         if measure.mode != "path" or measure.path_source != "reference":
-            return self.static_path
+            return static
         if ref_mask is None:
             flags.append("no_reference")
-            return self.static_path
+            return static
         try:
             # The object includes its target: moss can cover the stem completely.
-            return centerline_from_mask((ref_mask | mask) & self.roi, self.annotations.base,
-                                        measure.smooth_px)
+            return centerline_from_mask((ref_mask | mask) & self.plot_masks[plot.name],
+                                        plot.base, measure.smooth_px)
         except CenterlineError as exc:
-            log.warning("centerline failed (%s); using the annotated path", exc)
+            log.warning("centerline failed for %s (%s); using the annotated path",
+                        plot.name, exc)
             flags.append("centerline_failed")
-            return self.static_path
+            return static
 
-    def _measure(self, frame_row: dict, prepared: Prepared, mask: np.ndarray,
-                 ref_mask: np.ndarray | None = None) -> dict:
-        exp = self.experiment
+    def _frame_flags(self, prepared: Prepared) -> tuple[list[str], dict]:
         image, alignment = prepared.image, prepared.alignment
         flags = []
-        path = self._measure_path(mask, ref_mask, flags)
-        m = measure_along_path(
-            mask, path, self.roi, self.cfg.front_percentile, self.cfg.measure.corridor_px,
-            reference_mask=None if ref_mask is None else (ref_mask | mask),
-        )
-
         if alignment.method == "failed":
             flags.append("align_failed")
         elif (alignment.rms_px is not None and alignment.rms_px > 2) or \
                 (alignment.ecc is not None and alignment.ecc < ECC_POOR):
             flags.append("align_poor")
-        if m.target_px == 0:
-            flags.append("no_target")
         brightness = mean_brightness(image)
         sharp = sharpness(image)
         if self.ref_brightness > 0 and abs(brightness / self.ref_brightness - 1) > 0.2:
@@ -474,73 +473,125 @@ class Analyzer:
                 flags.append("lighting_changed")
             if light.saturated_fraction > 0.02:
                 flags.append("saturated")
-
-        row = {
-            "timestamp_utc": frame_row["timestamp_utc"],
-            "frame_file": frame_row["file"],
-            "camera": frame_row["camera"],
-            "settings_hash": self.settings_hash,
+        info = {
             "align_method": alignment.method,
             "align_rms_px": _fmt(alignment.rms_px, 3),
             "align_ecc": _fmt(alignment.ecc, 4),
             "align_scale": _fmt(alignment.scale, 5),
             "align_shift_px": _fmt(alignment.shift_px, 2),
-            "target_px": m.target_px,
-            "front_width_px": m.front_width_px,
-            "extent_px": _fmt(m.extent_px, 2),
-            "extent_max_px": _fmt(m.extent_max_px, 2),
-            "extent_fraction": _fmt(m.extent_fraction, 5),
-            "path_length_px": _fmt(m.path_length_px, 2),
-            "covered_length_px": _fmt(m.covered_length_px, 1),
-            "covered_length_pct": _fmt(100 * m.covered_length_px / m.path_length_px
-                                       if m.path_length_px else 0.0, 3),
-            "reference_px": "" if m.reference_px is None else m.reference_px,
-            "reference_covered_pct": "" if m.reference_covered_fraction is None
-            else _fmt(100 * m.reference_covered_fraction, 3),
-            "coverage_pct": _fmt(100 * m.coverage_fraction, 3),
             "mean_brightness": _fmt(brightness, 2),
             "sharpness": _fmt(sharp, 2),
             "light_gain_b": light.gains[0] if light else "",
             "light_gain_g": light.gains[1] if light else "",
             "light_gain_r": light.gains[2] if light else "",
-            "flags": ";".join(flags),
-            "extent_mm": "", "extent_mm_unc": "", "extent_max_mm": "", "axis_length_mm": "",
-            "covered_length_mm": "", "reference_area_mm2": "",
-            "target_area_mm2": "", "roi_area_mm2": "", "mask_file": "", "overlay_file": "",
         }
-        if self.scale is not None:
-            k = self.scale.mm_per_px
-            row.update({
-                "extent_mm": _fmt(m.extent_px * k, 3),
-                "extent_mm_unc": _fmt(extent_uncertainty_mm(
-                    m.extent_px, k, self.scale.se_mm_per_px,
-                    None if alignment.rms_px is None
-                    else alignment.rms_px * self.align_px_factor), 3),
-                "extent_max_mm": _fmt(m.extent_max_px * k, 3),
-                "axis_length_mm": _fmt(m.path_length_px * k, 3),
-                "covered_length_mm": _fmt(m.covered_length_px * k, 3),
-                "reference_area_mm2": "" if m.reference_px is None
-                else _fmt(m.reference_px * k * k, 2),
-                "target_area_mm2": _fmt(m.target_px * k * k, 2),
-                "roi_area_mm2": _fmt(m.roi_area_px * k * k, 2),
-            })
+        return flags, info
 
+    def _measure(self, frame_row: dict, prepared: Prepared, mask: np.ndarray,
+                 ref_mask: np.ndarray | None = None) -> list[dict]:
+        """One row per plot."""
+        exp = self.experiment
+        alignment = prepared.alignment
+        frame_flags, frame_info = self._frame_flags(prepared)
         stem = Path(frame_row["file"]).stem
+        mask_file = overlay_file = ""
         if self.cfg.save_masks:
             mask_path = self.masks_dir / f"{stem}.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(mask_path), mask.astype(np.uint8) * 255)
-            row["mask_file"] = mask_path.relative_to(exp.root).as_posix()
+            mask_file = mask_path.relative_to(exp.root).as_posix()
+
+        rows, drawn = [], []
+        for plot in self.plots:
+            region = self.plot_masks[plot.name]
+            flags = list(frame_flags)
+            path = self._measure_path(plot, mask, ref_mask, flags)
+            reference = None if ref_mask is None else (ref_mask | mask)
+            if path is not None:
+                m = measure_along_path(mask, path, region, self.cfg.front_percentile,
+                                       self.cfg.measure.corridor_px, reference_mask=reference)
+            else:
+                m = _area_only(mask, region, reference)
+            if m.target_px == 0:
+                flags.append("no_target")
+
+            row = {
+                "timestamp_utc": frame_row["timestamp_utc"],
+                "frame_file": frame_row["file"],
+                "camera": frame_row["camera"],
+                "plot": plot.name,
+                "settings_hash": self.settings_hash,
+                **frame_info,
+                "target_px": m.target_px,
+                "front_width_px": m.front_width_px if path is not None else "",
+                "extent_px": _fmt(m.extent_px, 2) if path is not None else "",
+                "extent_max_px": _fmt(m.extent_max_px, 2) if path is not None else "",
+                "extent_fraction": _fmt(m.extent_fraction, 5) if path is not None else "",
+                "path_length_px": _fmt(m.path_length_px, 2) if path is not None else "",
+                "covered_length_px": _fmt(m.covered_length_px, 1) if path is not None else "",
+                "covered_length_pct": _fmt(100 * m.covered_length_px / m.path_length_px, 3)
+                if path is not None and m.path_length_px else "",
+                "reference_px": "" if m.reference_px is None else m.reference_px,
+                "reference_covered_pct": "" if m.reference_covered_fraction is None
+                else _fmt(100 * m.reference_covered_fraction, 3),
+                "coverage_pct": _fmt(100 * m.coverage_fraction, 3),
+                **{k: _fmt(v, 5) for k, v in color_indices(prepared.frame, region).items()},
+                "flags": ";".join(flags),
+                "extent_mm": "", "extent_mm_unc": "", "extent_max_mm": "",
+                "axis_length_mm": "", "covered_length_mm": "", "reference_area_mm2": "",
+                "target_area_mm2": "", "roi_area_mm2": "", "equivalent_radius_mm": "",
+                "mask_file": mask_file, "overlay_file": "",
+            }
+            if self.scale is not None:
+                k = self.scale.mm_per_px
+                area = m.target_px * k * k
+                row.update({
+                    "reference_area_mm2": "" if m.reference_px is None
+                    else _fmt(m.reference_px * k * k, 2),
+                    "target_area_mm2": _fmt(area, 2),
+                    "roi_area_mm2": _fmt(m.roi_area_px * k * k, 2),
+                    "equivalent_radius_mm": _fmt(float(np.sqrt(area / np.pi)), 3),
+                })
+                if path is not None:
+                    row.update({
+                        "extent_mm": _fmt(m.extent_px * k, 3),
+                        "extent_mm_unc": _fmt(extent_uncertainty_mm(
+                            m.extent_px, k, self.scale.se_mm_per_px,
+                            None if alignment.rms_px is None
+                            else alignment.rms_px * self.align_px_factor), 3),
+                        "extent_max_mm": _fmt(m.extent_max_px * k, 3),
+                        "axis_length_mm": _fmt(m.path_length_px * k, 3),
+                        "covered_length_mm": _fmt(m.covered_length_px * k, 3),
+                    })
+            rows.append(row)
+            drawn.append((plot, m, row, path))
+
         if self.cfg.save_overlays:
             from fungus_cv.analyze.overlay import draw_overlay
 
-            overlay = draw_overlay(prepared.frame, mask, self.annotations, m, row, path=path,
-                                   reference_mask=ref_mask)
+            overlay = draw_overlay(prepared.frame, mask, drawn, reference_mask=ref_mask)
             overlay_path = self.results_dir / "overlays" / self.settings_hash / f"{stem}.jpg"
             overlay_path.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(overlay_path), overlay, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            row["overlay_file"] = overlay_path.relative_to(exp.root).as_posix()
-        return row
+            overlay_file = overlay_path.relative_to(exp.root).as_posix()
+            for row in rows:
+                row["overlay_file"] = overlay_file
+        return rows
+
+
+def _area_only(mask: np.ndarray, region: np.ndarray,
+               reference: np.ndarray | None) -> ExtentMeasurement:
+    """Area and coverage for a plot without a base/tip (e.g. a field plot)."""
+    target = int((mask & region).sum())
+    roi_area = int(region.sum())
+    ref_px = ref_frac = None
+    if reference is not None:
+        ref = reference & region
+        ref_px = int(ref.sum())
+        ref_frac = float((ref & mask).sum() / ref_px) if ref_px else 0.0
+    return ExtentMeasurement(target, 0.0, 0.0, 0.0, 0, roi_area,
+                             target / roi_area if roi_area else 0.0,
+                             reference_px=ref_px, reference_covered_fraction=ref_frac)
 
 
 def analyze(experiment: Experiment, force: bool = False) -> AnalysisSummary:

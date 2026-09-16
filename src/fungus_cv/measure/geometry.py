@@ -14,7 +14,68 @@ from fungus_cv.measure.path import ExtentMeasurement, Polyline, measure_along_pa
 
 ANNOTATIONS_NAME = "annotations.json"
 
-__all__ = ["Annotations", "ExtentMeasurement", "measure_extent", "extent_uncertainty_mm"]
+__all__ = ["Annotations", "ExtentMeasurement", "Plot", "measure_extent",
+           "extent_uncertainty_mm", "plots_hull"]
+
+
+def _polygon_mask(points, shape) -> np.ndarray:
+    """Pixels whose centres lie inside the polygon.
+
+    ``cv2.fillPoly`` also includes every pixel the outline touches, which inflates areas by
+    about half a pixel around the whole perimeter (~1% for a typical field plot).
+    """
+    from matplotlib.path import Path as MplPath
+
+    h, w = shape[:2]
+    poly = np.asarray(points, np.float64)
+    mask = np.zeros((h, w), bool)
+    x0, y0 = np.maximum(np.floor(poly.min(axis=0)).astype(int), 0)
+    x1, y1 = np.minimum(np.ceil(poly.max(axis=0)).astype(int) + 1, (w, h))
+    if x1 <= x0 or y1 <= y0:
+        return mask
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    inside = MplPath(poly).contains_points(np.c_[xx.ravel(), yy.ravel()])
+    mask[y0:y1, x0:x1] = inside.reshape(yy.shape)
+    return mask
+
+
+def _points(data) -> list[tuple[float, float]] | None:
+    return [tuple(p) for p in data] if data else None
+
+
+@dataclass
+class Plot:
+    """A named region measured on its own (e.g. one field plot or one plant).
+
+    ``base``/``tip``/``path`` are optional: without them only area, coverage and colour are
+    measured; with them extent is measured too.
+    """
+
+    name: str
+    polygon: list[tuple[float, float]]
+    base: tuple[float, float] | None = None
+    tip: tuple[float, float] | None = None
+    path: list[tuple[float, float]] | None = None
+
+    def __post_init__(self) -> None:
+        if len(self.polygon) < 3:
+            raise ValueError(f"plot {self.name!r} needs at least 3 polygon points")
+        if (self.base is None) != (self.tip is None):
+            raise ValueError(f"plot {self.name!r}: give both base and tip, or neither")
+        if self.base is not None and math.dist(self.base, self.tip) < 1:
+            raise ValueError(f"plot {self.name!r}: base and tip must be different points")
+
+    @property
+    def has_axis(self) -> bool:
+        return self.base is not None
+
+    def mask(self, shape) -> np.ndarray:
+        return _polygon_mask(self.polygon, shape)
+
+    def polyline(self, follow_path: bool = True) -> Polyline:
+        if not self.has_axis:
+            raise ValueError(f"plot {self.name!r} has no base/tip")
+        return Polyline(self.path if (follow_path and self.path) else [self.base, self.tip])
 
 
 @dataclass
@@ -24,10 +85,13 @@ class Annotations:
     ``base`` is where growth starts (e.g. the waterline or soil line), ``tip`` is the far end
     of the reference object (top of the towel or stem), ``roi`` is a polygon around the
     object; only target pixels inside it are measured.
+
+    For fields, ``plots`` lists named regions measured separately; ``base``/``tip`` may then
+    be omitted and ``roi`` should enclose all plots.
     """
 
-    base: tuple[float, float]
-    tip: tuple[float, float]
+    base: tuple[float, float] | None
+    tip: tuple[float, float] | None
     roi: list[tuple[float, float]]
     image_size: tuple[int, int]  # (width, height) of the reference frame
     reference_file: str = ""
@@ -37,23 +101,36 @@ class Annotations:
     # Optional line from base to tip following a curved object, clicked in `fungus annotate`
     # (base and tip included). Used by analysis.measure.mode: path.
     path: list[tuple[float, float]] | None = None
+    plots: list[Plot] | None = None
 
     def __post_init__(self) -> None:
         if len(self.roi) < 3:
             raise ValueError("roi needs at least 3 points")
-        if math.dist(self.base, self.tip) < 1:
+        if (self.base is None) != (self.tip is None):
+            raise ValueError("give both base and tip, or neither")
+        if self.base is None and not self.plots:
+            raise ValueError("base and tip are required unless plots are defined")
+        if self.base is not None and math.dist(self.base, self.tip) < 1:
             raise ValueError("base and tip must be different points")
         if self.reference_patch is not None and len(self.reference_patch) < 3:
             raise ValueError("reference_patch needs at least 3 points")
+        if self.plots:
+            names = [p.name for p in self.plots]
+            if len(names) != len(set(names)):
+                raise ValueError(f"plot names must be unique, got {names}")
 
     @property
     def axis_length_px(self) -> float:
         return math.dist(self.base, self.tip)
 
     def roi_mask(self, shape: tuple[int, int]) -> np.ndarray:
-        mask = np.zeros(shape[:2], np.uint8)
-        cv2.fillPoly(mask, [np.round(np.array(self.roi)).astype(np.int32)], 1)
-        return mask.astype(bool)
+        return _polygon_mask(self.roi, shape)
+
+    def measured_plots(self) -> list[Plot]:
+        """The plots to measure: the defined plots, or the whole region as plot ``main``."""
+        if self.plots:
+            return list(self.plots)
+        return [Plot("main", list(self.roi), self.base, self.tip, self.path)]
 
     def save(self, path: Path) -> None:
         data = asdict(self)
@@ -62,27 +139,46 @@ class Annotations:
     @classmethod
     def load(cls, path: Path) -> Annotations:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
+        plots = None
+        if data.get("plots"):
+            plots = [Plot(name=pl["name"], polygon=_points(pl["polygon"]),
+                          base=tuple(pl["base"]) if pl.get("base") else None,
+                          tip=tuple(pl["tip"]) if pl.get("tip") else None,
+                          path=_points(pl.get("path")))
+                     for pl in data["plots"]]
         return cls(
-            base=tuple(data["base"]),
-            tip=tuple(data["tip"]),
-            roi=[tuple(p) for p in data["roi"]],
+            base=tuple(data["base"]) if data.get("base") else None,
+            tip=tuple(data["tip"]) if data.get("tip") else None,
+            roi=_points(data["roi"]),
             image_size=tuple(data["image_size"]),
             reference_file=data.get("reference_file", ""),
-            reference_patch=[tuple(p) for p in data["reference_patch"]]
-            if data.get("reference_patch") else None,
-            path=[tuple(p) for p in data["path"]] if data.get("path") else None,
+            reference_patch=_points(data.get("reference_patch")),
+            path=_points(data.get("path")),
+            plots=plots,
         )
 
     def polyline(self) -> Polyline:
         """The clicked path, or the straight base -> tip axis if none was clicked."""
+        if self.base is None:
+            raise ValueError("these annotations have no base/tip (field plots only)")
         return Polyline(self.path if self.path else [self.base, self.tip])
 
     def patch_mask(self, shape: tuple[int, int]) -> np.ndarray | None:
         if not self.reference_patch:
             return None
-        mask = np.zeros(shape[:2], np.uint8)
-        cv2.fillPoly(mask, [np.round(np.array(self.reference_patch)).astype(np.int32)], 1)
-        return mask.astype(bool)
+        return _polygon_mask(self.reference_patch, shape)
+
+
+def plots_hull(plots: list[Plot], margin: float = 0.0) -> list[tuple[float, float]]:
+    """Convex hull around all plot polygons, e.g. as the overall region of interest."""
+    pts = np.concatenate([np.asarray(p.polygon, np.float32) for p in plots])
+    hull = cv2.convexHull(pts).reshape(-1, 2).astype(np.float64)
+    if margin:
+        centre = hull.mean(0)
+        direction = hull - centre
+        norm = np.linalg.norm(direction, axis=1, keepdims=True)
+        hull = hull + direction / np.where(norm > 0, norm, 1) * margin
+    return [tuple(map(float, p)) for p in hull]
 
 
 def measure_extent(

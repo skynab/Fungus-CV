@@ -105,8 +105,11 @@ def compare_runs(experiment: Experiment, run_a: str, run_b: str) -> ComparisonSu
         union = int((ma | mb).sum())
         inter = int((ma & mb).sum())
         iou = inter / union if union else 1.0  # both empty = full agreement
-        ea = measure_extent(ma, ann).extent_px * k
-        eb = measure_extent(mb, ann).extent_px * k
+        if ann.base is not None:
+            ea = measure_extent(ma, ann).extent_px * k
+            eb = measure_extent(mb, ann).extent_px * k
+        else:  # field plots only: compare areas instead
+            ea, eb = float(ma.sum()) * k * k, float(mb.sum()) * k * k
         rows.append({
             "frame": stem, "iou": round(iou, 5),
             "area_a_px": int(ma.sum()), "area_b_px": int(mb.sum()),

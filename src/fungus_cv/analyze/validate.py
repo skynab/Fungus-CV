@@ -17,15 +17,22 @@ from fungus_cv.storage import Experiment
 
 
 def write_template(experiment: Experiment, path: Path, count: int = 20) -> int:
-    """CSV of evenly spaced analyzed frames with an empty ``value`` column to fill in."""
-    rows = load_measurements(experiment)
-    chosen = [rows[i] for i in pick_evenly(len(rows), count)]
+    """CSV of evenly spaced analyzed frames (one row per plot) with an empty ``value``."""
+    all_rows = load_measurements(experiment)
+    frames = sorted({r["frame_file"] for r in all_rows},
+                    key=lambda f: next(r["timestamp_utc"] for r in all_rows
+                                       if r["frame_file"] == f))
+    chosen = {frames[i] for i in pick_evenly(len(frames), count)}
+    n = 0
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["frame", "timestamp_utc", "value", "observer", "notes"])
-        for r in chosen:
-            writer.writerow([Path(r["frame_file"]).name, r["timestamp_utc"], "", "", ""])
-    return len(chosen)
+        writer.writerow(["frame", "plot", "timestamp_utc", "value", "observer", "notes"])
+        for r in all_rows:
+            if r["frame_file"] in chosen:
+                writer.writerow([Path(r["frame_file"]).name, r["plot"], r["timestamp_utc"],
+                                 "", "", ""])
+                n += 1
+    return n
 
 
 @dataclass
@@ -57,13 +64,14 @@ def _match(key: str, rows: list[dict]) -> dict | None:
     return hits[0] if len(hits) == 1 else None
 
 
-def validate(experiment: Experiment, hand_csv: Path, metric: str = "extent_mm") -> Agreement:
+def validate(experiment: Experiment, hand_csv: Path, metric: str = "extent_mm",
+             plot: str | None = None) -> Agreement:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    rows = load_measurements(experiment)
+    rows = load_measurements(experiment, plot)
     if rows and metric not in rows[0]:
         raise ValueError(f"unknown metric {metric!r}")
     with open(hand_csv, newline="", encoding="utf-8") as f:
@@ -71,15 +79,23 @@ def validate(experiment: Experiment, hand_csv: Path, metric: str = "extent_mm") 
     if not hand:
         raise ValueError(f"{hand_csv} has no filled-in 'value' entries")
 
+    if plot is None and len({r["plot"] for r in rows}) > 1 and \
+            any(not (h.get("plot") or "").strip() for h in hand):
+        raise ValueError("this experiment has several plots: add a 'plot' column to the hand "
+                         "measurements or choose one plot")
     pairs, unmatched = [], []
     for h in hand:
         key = h.get("frame") or h.get("timestamp_utc") or ""
-        r = _match(key, rows)
+        wanted = (h.get("plot") or "").strip()
+        candidates = [r for r in rows if not wanted or r["plot"] == wanted]
+        if plot is not None and wanted and wanted != plot:
+            continue
+        r = _match(key, candidates)
         if r is None or r[metric] in ("", None):
             unmatched.append(key)
             continue
-        pairs.append((Path(r["frame_file"]).name, float(h["value"]), float(r[metric]),
-                      h.get("observer", "")))
+        label = Path(r["frame_file"]).name + ("" if r["plot"] == "main" else f" [{r['plot']}]")
+        pairs.append((label, float(h["value"]), float(r[metric]), h.get("observer", "")))
     if len(pairs) < 3:
         raise ValueError(f"only {len(pairs)} hand measurement(s) matched analyzed frames; "
                          "need at least 3")
@@ -107,7 +123,8 @@ def validate(experiment: Experiment, hand_csv: Path, metric: str = "extent_mm") 
         worst_frame=names[worst], worst_diff=float(diff[worst]), unmatched=unmatched,
     )
 
-    paired = out_dir / f"{metric}_pairs.csv"
+    suffix = f"_{plot}" if plot else ""
+    paired = out_dir / f"{metric}{suffix}_pairs.csv"
     with open(paired, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["frame", "hand", "automatic", "difference", "observer"])
@@ -140,7 +157,7 @@ def validate(experiment: Experiment, hand_csv: Path, metric: str = "extent_mm") 
     ax2.set_title(f"Bland–Altman (n = {n})", color=INK, loc="left", fontsize=11)
     ax2.legend(frameon=False, fontsize=9, labelcolor=INK)
     fig.tight_layout()
-    png = out_dir / f"{metric}_agreement.png"
+    png = out_dir / f"{metric}{suffix}_agreement.png"
     fig.savefig(png)
     plt.close(fig)
     result.files.append(png)

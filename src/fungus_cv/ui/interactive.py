@@ -5,7 +5,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from fungus_cv.measure.geometry import Annotations
+from fungus_cv.measure.geometry import Annotations, Plot, plots_hull
 from fungus_cv.segment.color import ColorThresholdSegmenter, hsv_range_from_samples
 from fungus_cv.segment.prompts import NEGATIVE, POSITIVE, FramePrompt
 
@@ -417,3 +417,73 @@ def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False) -> dict:
     finally:
         cv2.destroyWindow(window)
     return counts
+
+
+def annotate_field(image: np.ndarray, reference_file: str = "") -> Annotations:
+    """Outline plots (Enter closes each polygon), then optionally a neutral patch."""
+    view = _View(image, "fungus annotate --field")
+    plots: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = []
+    patch: list[tuple[float, float]] = []
+    state = {"patch_stage": False}
+
+    def on_mouse(event, x, y, flags, param):
+        view.mouse = (x, y)
+        if event == cv2.EVENT_LBUTTONDOWN:
+            (patch if state["patch_stage"] else current).append(view.to_full(x, y))
+
+    cv2.setMouseCallback(view.window, on_mouse)
+    try:
+        while True:
+            canvas = view.base.copy()
+            for n, poly in enumerate(plots, 1):
+                pts = np.array([view.to_view(p) for p in poly], np.int32)
+                cv2.polylines(canvas, [pts], True, (0, 255, 255), 2)
+                cx, cy = pts.mean(axis=0).astype(int)
+                cv2.putText(canvas, f"plot{n}", (int(cx) - 20, int(cy)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            for pts_list, color in ((current, (0, 200, 0)), (patch, (255, 200, 0))):
+                if pts_list:
+                    pts = np.array([view.to_view(p) for p in pts_list], np.int32)
+                    cv2.polylines(canvas, [pts], len(pts_list) > 2, color, 2)
+            if state["patch_stage"]:
+                stage = ("Optional: click corners of a NEUTRAL PATCH (white/grey card). "
+                         "Enter to finish or skip")
+            else:
+                stage = (f"Outline plot{len(plots) + 1}: click its corners, Enter to close it. "
+                         f"Enter with no clicks when all {len(plots)} plot(s) are done")
+            view.magnifier(canvas)
+            view.show(canvas, [stage, "u: undo   Esc: cancel"])
+
+            key = cv2.waitKey(20) & 0xFF
+            if key == ESC:
+                raise Cancelled()
+            if key == ord("u"):
+                if state["patch_stage"]:
+                    if patch:
+                        patch.pop()
+                    else:
+                        state["patch_stage"] = False
+                elif current:
+                    current.pop()
+                elif plots:
+                    current[:] = plots.pop()
+            elif key in ENTER_KEYS:
+                if state["patch_stage"]:
+                    if not patch or len(patch) >= 3:
+                        break
+                elif len(current) >= 3:
+                    plots.append(list(current))
+                    current.clear()
+                elif not current and plots:
+                    state["patch_stage"] = True
+    finally:
+        cv2.destroyWindow(view.window)
+
+    h, w = image.shape[:2]
+    plot_objs = [Plot(f"plot{n}", poly) for n, poly in enumerate(plots, 1)]
+    hull = [(float(np.clip(x, 0, w - 1)), float(np.clip(y, 0, h - 1)))
+            for x, y in plots_hull(plot_objs, margin=10)]
+    return Annotations(base=None, tip=None, roi=hull, image_size=(w, h),
+                       reference_file=reference_file, reference_patch=patch or None,
+                       plots=plot_objs)

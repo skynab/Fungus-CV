@@ -33,6 +33,30 @@ def _setup_logging(log_file: Path | None = None, verbose: bool = False) -> None:
     )
 
 
+def _require_camera_access() -> None:
+    """Stop with clear instructions if the OS won't let this process use a camera."""
+    from fungus_cv.capture.permissions import camera_access
+
+    def prompting(app):
+        typer.echo(f"macOS is asking for camera permission for {app or 'this app'}; "
+                   "click Allow (waiting up to 60 s)...")
+
+    access = camera_access(request=True, on_prompt=prompting)
+    if not access.ok:
+        typer.secho(access.advice(), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+
+
+def _require_gui() -> None:
+    """Interactive windows need an OpenCV build with a GUI and a display to show it on."""
+    from fungus_cv.capture.diagnostics import gui_problem
+
+    problem = gui_problem()
+    if problem:
+        typer.secho(problem, fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
+
+
 def _load_experiment(path: Path):
     from fungus_cv.storage import Experiment
 
@@ -53,6 +77,29 @@ def main(
     if version:
         typer.echo(__version__)
         raise typer.Exit()
+
+
+@app.command()
+def doctor(
+    probe: bool = typer.Option(True, help="Try opening cameras (needs camera permission)."),
+    request_permission: bool = typer.Option(
+        False, help="On macOS, ask for camera permission if it hasn't been decided yet."),
+) -> None:
+    """Check the camera, permissions, display and optional dependencies on this computer."""
+    from fungus_cv.capture.diagnostics import run_checks
+
+    quiet = logging.getLogger()
+    quiet.setLevel(logging.ERROR)
+    failed = 0
+    for check in run_checks(probe_cameras=probe, request_permission=request_permission):
+        mark = {True: "OK  ", False: "FAIL", None: "info"}[check.ok]
+        color = {True: typer.colors.GREEN, False: typer.colors.RED, None: None}[check.ok]
+        typer.secho(f"[{mark}] {check.name}: {check.detail}", fg=color)
+        if check.fix and check.ok is not True:
+            typer.echo(f"       -> {check.fix}")
+        failed += check.ok is False
+    if failed:
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -79,20 +126,29 @@ def cameras(
 ) -> None:
     """List connected cameras."""
     from fungus_cv.capture.camera import list_cameras
+    from fungus_cv.capture.permissions import camera_names
 
+    _require_camera_access()
     found = list_cameras(max_index=max_index, backend=backend)
+    names = camera_names()
     if not found:
+        from fungus_cv.capture.diagnostics import no_camera_hint
+
         typer.echo("No cameras found.")
-        if sys.platform == "darwin":
-            typer.echo(
-                "On macOS, allow camera access for your terminal app in "
-                "System Settings > Privacy & Security > Camera."
-            )
+        typer.echo(no_camera_hint())
+        if names:
+            listed = names.values() if isinstance(names, dict) else names
+            typer.echo(f"The system reports: {', '.join(listed)}. It may be in use by another "
+                       "app, or need a different --backend.")
         raise typer.Exit(1)
     for cam in found:
-        typer.echo(
-            f"index {cam['index']}: {cam['width']}x{cam['height']} (backend {cam['backend']})"
-        )
+        label = ""
+        if isinstance(names, dict) and cam["index"] in names:
+            label = f"  {names[cam['index']]}"
+        typer.echo(f"index {cam['index']}: {cam['width']}x{cam['height']} "
+                   f"(backend {cam['backend']}){label}")
+    if isinstance(names, list) and names:
+        typer.echo(f"macOS reports: {', '.join(names)} (index order usually follows this list)")
 
 
 @app.command()
@@ -106,11 +162,13 @@ def preview(
     """Live view for framing and focus. Keys: q quit, s snapshot, g grid, d driver dialog."""
     import cv2
 
-    from fungus_cv.capture.camera import Camera
+    from fungus_cv.capture.camera import Camera, CameraError
     from fungus_cv.config import CameraConfig
     from fungus_cv.quality import mean_brightness, sharpness
 
     _setup_logging()
+    _require_gui()
+    _require_camera_access()
     out_dir = Path.cwd()
     if experiment is not None:
         exp = _load_experiment(experiment)
@@ -121,7 +179,14 @@ def preview(
 
     window = f"fungus preview - {cam_cfg.name}"
     show_grid = False
-    with Camera(cam_cfg) as cam:
+    cam = Camera(cam_cfg)
+    try:
+        cam.open()
+    except CameraError as exc:
+        typer.secho(f"{exc}. Check `fungus cameras` for available indices, and that no other "
+                    "app is using the camera.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    with cam:
         typer.echo("q: quit   s: save snapshot   g: toggle grid   d: driver settings (Windows)")
         while True:
             frame = cam.read()
@@ -170,6 +235,8 @@ def capture(
     duration: str | None = typer.Option(None, help="Override duration, e.g. 30m, 14d."),
     max_frames: int | None = typer.Option(None, help="Override number of capture rounds."),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
+    check_cameras: bool = typer.Option(True, help="Open every camera once before starting, "
+                                       "so a wrong index fails now rather than at each shot."),
 ) -> None:
     """Capture images on a schedule until stopped (Ctrl+C) or a limit is reached."""
     from fungus_cv.capture.power import keep_awake
@@ -189,6 +256,9 @@ def capture(
     if max_frames is not None:
         cap.max_frames = max_frames
 
+    _require_camera_access()
+    if check_cameras:
+        _check_cameras_open(exp)
     session = CaptureSession(exp)
     with keep_awake(cap.keep_awake):
         try:
@@ -203,6 +273,26 @@ def capture(
         raise typer.Exit(1)
 
 
+def _check_cameras_open(exp) -> None:
+    from fungus_cv.capture.camera import Camera, CameraError
+
+    problems = []
+    for cfg in exp.config.cameras:
+        cam = Camera(cfg)
+        try:
+            cam.open()
+            cam.read()
+            typer.echo(f"camera {cfg.name}: ok")
+        except CameraError as exc:
+            problems.append(f"camera {cfg.name}: {exc}")
+        finally:
+            cam.close()
+    if problems:
+        typer.secho("\n".join(problems) + "\nFix config.yaml (see `fungus cameras`) or pass "
+                    "--no-check-cameras to start anyway.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+
 @app.command()
 def snap(
     experiment: Path = typer.Argument(..., help="Experiment folder."),
@@ -212,6 +302,7 @@ def snap(
 
     exp = _load_experiment(experiment)
     _setup_logging(exp.log_path)
+    _require_camera_access()
     session = CaptureSession(exp)
     try:
         records = session.capture_round()
@@ -319,6 +410,7 @@ def annotate(
                                "base/tip/region (plots are named plot1, plot2, ...)."),
 ) -> None:
     """Click the base, tip and region to measure on the reference (first) frame."""
+    _require_gui()
     from fungus_cv.analyze.pipeline import AnalysisError, Analyzer, annotations_path
     from fungus_cv.ui.interactive import Cancelled, annotate_field
     from fungus_cv.ui.interactive import annotate as run_annotate
@@ -358,6 +450,7 @@ def pick_color(
     write: bool = typer.Option(True, help="Write the ranges into config.yaml."),
 ) -> None:
     """Measure the target's color by dragging boxes over it, then save the HSV ranges."""
+    _require_gui()
     import cv2
 
     from fungus_cv.config import replace_hsv_ranges_in_yaml
@@ -507,6 +600,7 @@ def prompt(
                                    help="Prompt the reference object (e.g. stem) instead."),
 ) -> None:
     """Click on the target for SAM 2 (left = target, right = not target)."""
+    _require_gui()
     from fungus_cv.analyze.pipeline import AnalysisError, Analyzer
     from fungus_cv.segment.prompts import Prompts
     from fungus_cv.segment.sam2 import Sam2VideoSegmenter, _RoiCrop
@@ -724,6 +818,7 @@ def label(
     start: int = typer.Option(0, help="Item number to start at."),
 ) -> None:
     """Correct masks with a brush; saving marks an item as reviewed."""
+    _require_gui()
     from fungus_cv.learn.dataset import Dataset
     from fungus_cv.ui.interactive import edit_labels
 

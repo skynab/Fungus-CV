@@ -18,6 +18,8 @@ dependencies = [
     "scipy>=1.11",
     "matplotlib>=3.8",
     "tzdata; sys_platform == 'win32'",
+    # macOS camera permission checks and camera names
+    "pyobjc-framework-AVFoundation>=10; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]

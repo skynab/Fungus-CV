@@ -18,6 +18,13 @@ pip install -e ".[dev]"
 
 ## Quick start
 
+Check the computer first. `fungus doctor` checks camera permission, the cameras the system reports, window support for `preview`/`annotate`, optional model dependencies, the GPU and disk space, and says how to fix each problem.
+
+```bash
+fungus doctor
+```
+
+
 ```bash
 fungus cameras                       # which cameras are connected?
 fungus init experiments/dye-test-1   # creates the folder and config.yaml
@@ -256,6 +263,20 @@ experiments/dye-test-1/
 `frames.csv` columns: `timestamp_utc, camera, status (ok/failed), file, sha256, width, height, source, scheduled_utc, lag_s, mean_brightness, sharpness, camera_settings (JSON), notes`.
 
 `mean_brightness` and `sharpness` are recorded so bad frames can be found later, for example when a light was switched on or the camera lost focus.
+
+## Troubleshooting cameras
+
+- **macOS asks per app, not per program.** The permission belongs to the app you start `fungus` from (Terminal, iTerm, VS Code, …).
+  - **Undecided:** the first camera command asks, waits up to 60 s for you to click Allow, then continues.
+  - **Denied:** turn the app on in System Settings → Privacy & Security → Camera, then restart that app.
+  - **"macOS will not show a camera permission prompt for <app>":** some apps (including the Claude desktop app) can't show the prompt. Run the command from **Terminal** instead, or add the app manually in Settings.
+- **Windows:** Settings → Privacy & security → Camera → turn on *Camera access* and *Let desktop apps access your camera*. Close Teams, Zoom or the Camera app if they hold the camera, or try `--backend msmf`.
+- **Linux:** your user needs to be in the `video` group (`sudo usermod -aG video $USER`, then log out and back in). Interactive windows need a desktop session; over SSH, use `ssh -X`.
+- **Which index is which camera:**
+  - **Linux:** `fungus cameras` prints the device names.
+  - **macOS:** it lists the names macOS reports, which usually follow the same order.
+  - **Everywhere:** `fungus preview --index N` shows the live image.
+- **A wrong index in `config.yaml`:** `fungus capture` opens every camera before starting and stops with an error if one fails, instead of logging a failure at every scheduled shot. Use `--no-check-cameras` to skip that check.
 
 ## Getting consistent images (important for measurements)
 

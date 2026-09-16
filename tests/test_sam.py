@@ -4,6 +4,7 @@ Tests that load the real model are skipped unless FUNGUS_TEST_SAM=1 (they downlo
 weights and need PyTorch).
 """
 
+import dataclasses
 import os
 from pathlib import Path
 
@@ -195,3 +196,29 @@ def test_sam2_matches_color_threshold_on_synthetic_dye(experiment):
     result = compare_runs(exp, runs[0].run_id, runs[1].run_id)
     assert result.iou_min > 0.9
     assert Path(result.csv_path).exists()
+
+
+@needs_sam
+def test_sam2_threshold_variants_nest(experiment):
+    """Segmentation uncertainty for SAM 2: logits re-thresholded tighter and looser."""
+    build_experiment(experiment, minutes=range(0, 3), bump_at=-1)
+    exp = Experiment(experiment.root)
+    files = [r["file"] for r in exp.read_frames()]
+    Prompts([FramePrompt(files[2], points=[(600.0, 800.0)], labels=[1])]).save(
+        exp.root / "prompts.json")
+    text = exp.config_path.read_text().replace("method: color", "method: sam2", 1)
+    exp.config_path.write_text(text.replace("sam2.1-hiera-small", "sam2.1-hiera-tiny"))
+    analyze(Experiment(exp.root))
+
+    from fungus_cv.segment.sam2 import Sam2VideoSegmenter
+
+    analyzer = pipeline.Analyzer(Experiment(exp.root))
+    seg = analyzer.segmenter
+    load = analyzer.aligned_frame
+    plain = dict(Sam2VideoSegmenter.segment_sequence(
+        dataclasses.replace(seg, variant_logit_delta=None), files, load, {2}))
+    (i, mask, (tight, loose)), = seg.segment_sequence(files, load, {2})
+    assert i == 2 and np.array_equal(mask, plain[2])
+    assert not (tight & ~mask).any() and not (mask & ~loose).any()
+    rows = read_measurements(exp)
+    assert all(r["extent_mm_seg_unc"] != "" for r in rows)

@@ -77,7 +77,7 @@ What `analyze` does for each frame:
    - `extent_mm`: the front's median height across the towel's width, measured from the base along the base→tip axis.
    - `extent_max_mm`: the highest point the front reaches.
    - Area and coverage %.
-4. **Uncertainty:** `extent_mm_unc` is a combined standard uncertainty from the marker scale, pixel size and alignment residual. It does not include how exactly the threshold places the dye edge; see *Accuracy notes*.
+4. **Uncertainty:** `extent_mm_unc` is a combined standard uncertainty from the marker scale, pixel size, alignment residual and segmentation (where the edge is placed); see *Segmentation uncertainty* below.
 5. **Flag** frames that are doubtful: `align_failed`, `align_poor`, `no_target`, `brightness_changed`, `blurry`.
 
 Results go to `results/measurements.csv`, with a mask and an overlay image per frame.
@@ -86,7 +86,7 @@ Results go to `results/measurements.csv`, with a mask and an overlay image per f
 - **Settings changes:** if you change the settings, old results are moved to `results/archive/`, never mixed with new ones.
 - **Re-runs:** only new frames are measured.
 
-`report` fits these models to the data:
+`report` fits these models to the data (the first four by default; pick others with `--model`, repeatable):
 
 | Model | Formula | Use |
 |---|---|---|
@@ -94,16 +94,105 @@ Results go to `results/measurements.csv`, with a mask and an overlay image per f
 | sqrt | `k·√t` | capillary wicking (Lucas–Washburn) |
 | power | `a·tⁿ` | **n ≈ 0.5 confirms wicking behavior**, so it's a good end-to-end check |
 | logistic | `K / (1 + e^(−r(t − t_mid)))` | growth that levels off, e.g. infection |
+| sqrt_lag | `k·√(t − t_lag)` | wicking when the exact start time isn't known |
+| gompertz | `A·exp(−exp(μe/A·(λ − t) + 1))` | growth with a lag: μ = maximum rate, λ = lag time (Zwietering) |
+| richards | `K / (1 + ν·e^(−r(t − t_mid)))^(1/ν)` | asymmetric S-curve; ν = 1 is the logistic |
 
-It outputs parameters ± standard errors, R², and AIC (lower AIC = better model), weighted by the per-frame uncertainty. Output files:
+For each model it reports:
 
-- `results/report/`: the main plot, a quality-check plot, `fits.json` and an optional overlay video.
+- **Parameters:** estimate ± standard error [95% bootstrap interval]. The bootstrap uses 1000 refits by default; set `--bootstrap 0` to skip it. Frames are weighted by their uncertainty.
+- **Model comparison:**
+  - **AICc** (AIC corrected for small samples; lower is better).
+  - **Akaike weight:** the share of evidence for each model among those fitted; the best model has the highest.
+  - R² for reference.
+- **Correlated errors (`--errors auto`):**
+  - Consecutive frames often share errors (lighting drift, a slowly moving shadow). Fitting as if they were independent makes the intervals far too narrow.
+  - Each model is therefore fitted both with independent errors and with first-order autoregressive (AR(1)) errors, using generalized least squares as in R's `gnls` with `corAR1`. AICc keeps the better of the two.
+  - The correlation is defined per typical interval between photos, so uneven intervals are handled.
+  - The bootstrap rebuilds correlated errors from the fitted AR(1) process.
+- **Diagnostics:**
+  - **χ²/dof:** about 1 means the per-frame uncertainties explain the scatter. Much more than 1 means something is missing.
+  - **Durbin–Watson:** about 2 means residuals are independent. Well below 1 means streaks, usually a model that doesn't fit.
+  - Plain-language warnings for either problem.
+
+**How well the intervals work.** On 150 simulated logistic time-lapses of 60 frames, 95% intervals for `t_mid` contained the true value this often:
+
+| Frame errors | Treating frames as independent | `--errors auto` |
+|---|---|---|
+| independent | 94% | 94% |
+| AR(1), correlation 0.5 | 75% | 90% |
+| AR(1), correlation 0.9 | 31% | 71% |
+
+With very strongly correlated errors there are few effectively independent frames, so intervals can still be too narrow. The fit warns when this happens; more replicates help more than more frames.
+
+Output files:
+
+- `results/report/`: the main plot, a quality-check plot, `fits.json` (every statistic above) and an optional overlay video.
 - Frames where the front moves back by more than 3σ are circled as worth checking.
+
+## Studies: replicates and conditions
+
+A study compares conditions (e.g. treated vs control) across replicate experiments:
+
+```bash
+fungus study studies/moss-treatment.yaml --init   # example file to edit
+fungus study studies/moss-treatment.yaml
+```
+
+The file lists each experiment (or field plot) with its `condition`, an optional `replicate` name and an optional `t0`, such as the inoculation time. It also sets the `metric`, the `model` whose parameters are compared, and optionally which `params`, a `reference` condition and extra models for `also_fit`.
+
+**How it's analyzed** (two stages, the standard approach for replicated growth curves):
+
+1. Every replicate is fitted separately, with the same settings as `report`: weighting, AR(1) errors, bootstrap intervals.
+2. The replicates' parameter estimates are then the data. **The replicate is the unit of inference**, so hundreds of frames from one time-lapse never count as hundreds of samples.
+
+**Outputs** go to `<study>_results/`:
+
+| File | Contents |
+|---|---|
+| `replicates.csv` | per replicate: every parameter with SE and 95% interval, R², AICc, χ²/dof, Durbin–Watson, warnings, settings hash |
+| `conditions.csv` | per condition and parameter: n, mean, SD, SE, t-based 95% CI, median, range; random-effects (DerSimonian–Laird) mean using each replicate's own uncertainty, with between-replicate SD τ and I² |
+| `comparisons.csv` | each condition vs the reference (or all pairs): difference with 95% CI, Welch's t, df, p, Holm-adjusted p (within each parameter), Hedges' g |
+| `model_selection.csv` | AICc and Akaike weights per replicate, and summed over replicates |
+| `data_long.csv` | every frame of every replicate in long format, for R or Python |
+| `curves.png/.svg`, `parameters.png/.svg` | replicate data and fits with condition means; parameter estimates by condition |
+| `study.json` | everything above plus the software version and git commit |
+| `methods.md` | a draft methods paragraph with the actual settings, n per condition and tests, plus any warnings to resolve |
+
+**Checks:**
+- **Mismatched analysis settings:** if replicates were analyzed with different segmentation, alignment, lighting, measurement or uncertainty settings, the study warns, because a difference between conditions could come from the analysis.
+- **Unusable replicates:** replicates whose fit fails are left out and listed.
+- **Too few replicates:** a condition with fewer than 2 usable replicates gets no SD or test.
+
+With 2–3 replicates per condition a t-test has little power. Report the estimates and confidence intervals, not only p-values.
 
 ### Accuracy notes
 - Markers must lie in the same plane as the object, and the camera should face that plane square-on. The analysis warns if marker edges disagree by more than 2%, which suggests a tilted view.
 - Set `--t0` to the moment the towel touched the dye. Otherwise t = 0 is the first photo.
-- The dye-edge position depends on the color thresholds. To estimate that uncertainty, re-run with slightly wider and narrower `hsv_ranges` and compare. Archived results make this easy.
+- The dye-edge position depends on the color thresholds. This is measured for every frame; see *Segmentation uncertainty*.
+
+### Segmentation uncertainty
+
+A sharp edge lands in the same place whatever the exact threshold, but a fading one doesn't. So each frame is also segmented once narrower and once wider, and the spread of the results goes into the uncertainty.
+
+| Method | Narrower / wider | Setting |
+|---|---|---|
+| color | every HSV bound moved in / out (H, S, V) | `analysis.uncertainty.hsv_delta: [4, 20, 20]` |
+| model | probability threshold + / − | `probability_delta: 0.1` |
+| sam2 | `mask_threshold` + / − on SAM's logits | `logit_delta: 1.0` |
+
+- **Cost:** the model's probabilities and SAM's logits are computed once and thresholded three times, so this is almost free. Colour thresholds run three times.
+- **Statistics:** the nominal, narrow and wide values are taken as the bounds of a rectangular distribution: u = (max − min) / (2√3) (GUM type B).
+- **Columns:**
+  - `extent_mm_seg_unc` and `extent_px_seg_unc`: the segmentation term on its own. It is also added in quadrature to `extent_mm_unc`.
+  - `target_area_mm2_unc`: scale (counted twice, since area scales with its square) and segmentation.
+  - `coverage_pct_unc`: segmentation only.
+- **Reports:** `report` weights fits by `<metric>_unc` for any metric that has one, so area fits are weighted too.
+- **Limits:**
+  - The deltas are a judgement call: choose them as the range of settings you'd consider equally right, and state them in your methods.
+  - For `path_source: reference`, the stem centerline is kept fixed across the variants.
+  - Turn it off with `analysis.uncertainty.segmentation: false`.
+- **Existing results:** the new settings change the settings hash, so existing results are archived and measured again on the next `analyze`. That takes a while for SAM runs.
 
 ## Field plots: coverage, spread and colour
 
@@ -174,6 +263,37 @@ This reports Bland–Altman agreement between automatic and hand values:
 - the frame with the largest difference
 
 It also writes paired values and an agreement plot to `results/validation/`. If several people measure, add an `observer` column to track who measured each frame.
+
+**Are the uncertainties honest?** When the metric has an uncertainty column (e.g. `extent_mm_unc`), `validate` also reports:
+- the share of automatic − hand differences within 2 combined uncertainties (expect about 95%)
+- the RMS of the differences divided by their uncertainties (expect about 1)
+
+Put your own reading uncertainty in the optional `value_unc` column; it is combined in quadrature. Much less than 95% means the reported uncertainties are too small, or there is a bias.
+
+### Validation suite: re-check accuracy after every change
+
+Collect your hand-labeled real data once, then re-run every accuracy check with one command:
+
+```bash
+fungus validate-suite validation/suite.yaml --init    # example file to edit
+fungus validate-suite validation/suite.yaml --save-baseline   # first time, once results look right
+fungus validate-suite validation/suite.yaml           # after any code or settings change
+```
+
+A suite lists **cases**. Each case runs one or more **checks**, and each check sets bounds on its metrics (`min`, `max`, `abs_max` or `max_drift`):
+
+| Check | Compares | Metrics |
+|---|---|---|
+| `masks` | the current run's masks with hand-drawn mask PNGs named like the frames | `iou_mean`, `iou_median`, `iou_min`, `extent_diff_mean`, `extent_diff_sd`, `n_frames` |
+| `measurements` | measurements with a hand CSV (`validate`) | `bias`, `bias_ci_low/high`, `loa_low/high`, `sd_diff`, `mae`, `rmse`, `pearson_r`, `slope`, `intercept`, `within_2u`, `z_rms`, `n` |
+| `model` | a trained model with a labeled test set (`evaluate`) | `iou_mean`, `dice_mean`, `precision_mean`, `recall_mean`, `boundary_f1_2px_mean`, `*_min`, and `unseen_*` for items not used in training |
+
+- **Analysis first:** experiments are analyzed with the current code before checking (`analyze: false` skips that).
+- **Baseline:** `max_drift` compares a metric with `baseline.json`, which `--save-baseline` writes. A change that moves IoU or bias more than you allow fails, even when the result is still within its absolute limits.
+- **Outputs:** each run writes `suite_results/<time>/results.json` and `summary.csv`. They record every value, its baseline and drift, the pass/fail reasons, the settings hash of each experiment, each model's weights hash, and the fungus-cv version and git commit.
+- **Exit code:** 1 if any check fails, so it can gate a merge.
+- **From pytest:** `FUNGUS_SUITE=validation/suite.yaml pytest tests/test_suite.py`.
+- **Starting set:** about 10 dye frames and 5 moss frames with hand masks, plus 20 hand-measured frames per experiment. Keep the data (or an archive of it) with the suite so results can be reproduced.
 
 ## Robustness: tilted cameras, changing light, bad frames
 

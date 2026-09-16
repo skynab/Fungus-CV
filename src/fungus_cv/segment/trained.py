@@ -23,6 +23,11 @@ def resolve_model_path(path: str, experiment_root: Path | None) -> Path:
                             f"{', '.join(str(c) for c in candidates)})")
 
 
+def threshold_variants(threshold: float, delta: float) -> list[float]:
+    """Stricter and looser probability thresholds, kept inside (0.01, 0.99)."""
+    return [min(threshold + delta, 0.99), max(threshold - delta, 0.01)]
+
+
 @dataclass
 class TrainedModelSegmenter:
     model_dir: Path
@@ -33,6 +38,7 @@ class TrainedModelSegmenter:
     tile_px: int = 512
     overlap_px: int = 64
     min_blob_area_px: int = 0
+    variant_probability_delta: float | None = None  # for segmentation uncertainty
     name: str = field(default="model", init=False)
 
     @classmethod
@@ -54,6 +60,13 @@ class TrainedModelSegmenter:
         return load_trained(self.model_dir, self.device)
 
     def segment(self, image: np.ndarray) -> np.ndarray:
+        return self._segment(image, with_variants=False)[0]
+
+    def segment_variants(self, image: np.ndarray) -> tuple[np.ndarray, list[np.ndarray]]:
+        """The mask, plus masks at the threshold -/+ ``variant_probability_delta``."""
+        return self._segment(image, with_variants=self.variant_probability_delta is not None)
+
+    def _segment(self, image: np.ndarray, with_variants: bool):
         from fungus_cv.learn.infer import predict_probabilities
 
         loaded = self._loaded()
@@ -63,8 +76,12 @@ class TrainedModelSegmenter:
         prob = predict_probabilities(loaded.net, window.crop(image), loaded.device,
                                      self.tile_px, self.overlap_px)
         t = self.threshold if self.threshold is not None else loaded.threshold
-        mask = window.paste(prob >= t, h, w)
-        return _drop_small_blobs(mask, self.min_blob_area_px)
+        thresholds = [t]
+        if with_variants:
+            thresholds += threshold_variants(t, self.variant_probability_delta)
+        masks = [_drop_small_blobs(window.paste(prob >= x, h, w), self.min_blob_area_px)
+                 for x in thresholds]
+        return masks[0], masks[1:]
 
     def describe(self) -> dict:
         loaded = self._loaded()

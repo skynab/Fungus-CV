@@ -26,11 +26,12 @@ def write_template(experiment: Experiment, path: Path, count: int = 20) -> int:
     n = 0
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["frame", "plot", "timestamp_utc", "value", "observer", "notes"])
+        writer.writerow(["frame", "plot", "timestamp_utc", "value", "value_unc", "observer",
+                         "notes"])
         for r in all_rows:
             if r["frame_file"] in chosen:
                 writer.writerow([Path(r["frame_file"]).name, r["plot"], r["timestamp_utc"],
-                                 "", "", ""])
+                                 "", "", "", ""])
                 n += 1
     return n
 
@@ -50,6 +51,10 @@ class Agreement:
     intercept: float
     worst_frame: str
     worst_diff: float
+    # Are the reported uncertainties honest? Needs a ``<metric>_unc`` column; hand values
+    # may carry their own ``value_unc``. Expect ~95% within 2u and an RMS z of ~1.
+    within_2u: float = math.nan  # share of |automatic - hand| <= 2 * combined uncertainty
+    z_rms: float = math.nan  # RMS of (automatic - hand) / combined uncertainty
     unmatched: list[str] = field(default_factory=list)
     files: list[Path] = field(default_factory=list)
 
@@ -95,7 +100,10 @@ def validate(experiment: Experiment, hand_csv: Path, metric: str = "extent_mm",
             unmatched.append(key)
             continue
         label = Path(r["frame_file"]).name + ("" if r["plot"] == "main" else f" [{r['plot']}]")
-        pairs.append((label, float(h["value"]), float(r[metric]), h.get("observer", "")))
+        auto_unc = r.get(f"{metric}_unc") or ""
+        pairs.append((label, float(h["value"]), float(r[metric]), h.get("observer", ""),
+                      float(auto_unc) if auto_unc != "" else math.nan,
+                      float((h.get("value_unc") or "").strip() or 0)))
     if len(pairs) < 3:
         raise ValueError(f"only {len(pairs)} hand measurement(s) matched analyzed frames; "
                          "need at least 3")
@@ -112,6 +120,11 @@ def validate(experiment: Experiment, hand_csv: Path, metric: str = "extent_mm",
     r = float(np.corrcoef(hand_v, auto_v)[0, 1]) if hand_v.std() > 0 and auto_v.std() > 0 \
         else math.nan
     worst = int(np.argmax(np.abs(diff)))
+    unc = np.sqrt(np.array([p[4] for p in pairs]) ** 2 + np.array([p[5] for p in pairs]) ** 2)
+    within_2u = z_rms = math.nan
+    if np.all(np.isfinite(unc)) and np.all(unc > 0):
+        within_2u = float((np.abs(diff) <= 2 * unc).mean())
+        z_rms = float(np.sqrt(((diff / unc) ** 2).mean()))
 
     out_dir = experiment.root / RESULTS_DIR / "validation"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -120,16 +133,19 @@ def validate(experiment: Experiment, hand_csv: Path, metric: str = "extent_mm",
         sd_diff=sd, limits_of_agreement=(bias - 1.96 * sd, bias + 1.96 * sd),
         mae=float(np.abs(diff).mean()), rmse=float(np.sqrt((diff ** 2).mean())),
         pearson_r=r, slope=float(slope), intercept=float(intercept),
-        worst_frame=names[worst], worst_diff=float(diff[worst]), unmatched=unmatched,
+        worst_frame=names[worst], worst_diff=float(diff[worst]), within_2u=within_2u,
+        z_rms=z_rms, unmatched=unmatched,
     )
 
     suffix = f"_{plot}" if plot else ""
     paired = out_dir / f"{metric}{suffix}_pairs.csv"
     with open(paired, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["frame", "hand", "automatic", "difference", "observer"])
-        for (name, hv, av, obs), d in zip(pairs, diff):
-            writer.writerow([name, hv, av, round(float(d), 6), obs])
+        writer.writerow(["frame", "hand", "automatic", "difference", "observer",
+                         "automatic_unc", "hand_unc"])
+        for (name, hv, av, obs, au, hu), d in zip(pairs, diff):
+            writer.writerow([name, hv, av, round(float(d), 6), obs,
+                             "" if math.isnan(au) else au, hu])
     result.files.append(paired)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.8), dpi=150)

@@ -26,6 +26,7 @@ from fungus_cv.gui.pages.camera import CameraPage
 from fungus_cv.gui.pages.capture import CapturePage
 from fungus_cv.gui.pages.doctor import DoctorPage
 from fungus_cv.gui.pages.experiment import ExperimentPage
+from fungus_cv.gui.pages.prompt import PromptPage
 from fungus_cv.gui.pages.report import ReportPage
 from fungus_cv.gui.pages.setup import SetupPage
 from fungus_cv.gui.qt_util import APP_NAME, log_dir, preload_modules, show_error
@@ -44,20 +45,39 @@ class MainWindow(QMainWindow):
         self.nav.setIconSize(QSize(18, 18))
         self.nav.setFixedWidth(190)
         self.stack = QStackedWidget()
-        self.pages = [
-            ("Experiment", ExperimentPage(self.state, self)),
-            ("Camera", CameraPage(self.state)),
-            ("Capture", CapturePage(self.state, log_handler)),
-            ("Set up measurement", SetupPage(self.state)),
-            ("Analyze", AnalyzePage(self.state)),
-            ("Report", ReportPage(self.state)),
-            ("Diagnostics", DoctorPage(self.state)),
+        sections = [
+            ("Capture", [
+                ("Experiment", ExperimentPage(self.state, self)),
+                ("Camera", CameraPage(self.state)),
+                ("Capture", CapturePage(self.state, log_handler)),
+            ]),
+            ("Measure", [
+                ("Set up measurement", SetupPage(self.state)),
+                ("SAM prompts", PromptPage(self.state)),
+                ("Analyze", AnalyzePage(self.state)),
+                ("Report", ReportPage(self.state)),
+            ]),
+            ("This computer", [
+                ("Diagnostics", DoctorPage(self.state)),
+            ]),
         ]
-        for title, page in self.pages:
-            self.nav.addItem(QListWidgetItem(title))
-            self.stack.addWidget(page)
+        self.pages = []
+        self._row_to_page: dict[int, int] = {}
+        for section, pages in sections:
+            header = QListWidgetItem(section.upper())
+            header.setFlags(Qt.NoItemFlags)
+            font = header.font()
+            font.setPointSizeF(max(8.0, font.pointSizeF() - 2))
+            font.setBold(True)
+            header.setFont(font)
+            self.nav.addItem(header)
+            for title, page in pages:
+                self._row_to_page[self.nav.count()] = len(self.pages)
+                self.nav.addItem(QListWidgetItem(title))
+                self.stack.addWidget(page)
+                self.pages.append((title, page))
         self.nav.currentRowChanged.connect(self._show_page)
-        self.nav.setCurrentRow(0)
+        self.nav.setCurrentRow(1)
 
         self.nav.setObjectName("nav")
         self.nav.setStyleSheet(
@@ -85,14 +105,16 @@ class MainWindow(QMainWindow):
     # --- navigation ----------------------------------------------------------------------
 
     def _show_page(self, row: int) -> None:
-        self.stack.setCurrentIndex(row)
+        if row not in self._row_to_page:
+            return  # a section header
+        self.stack.setCurrentIndex(self._row_to_page[row])
         page = self.stack.currentWidget()
         if hasattr(page, "on_shown"):
             page.on_shown()
 
     def go_to(self, title: str) -> None:
-        for row, (name, _) in enumerate(self.pages):
-            if name == title:
+        for row, index in self._row_to_page.items():
+            if self.pages[index][0] == title:
                 self.nav.setCurrentRow(row)
 
     def _experiment_changed(self, experiment) -> None:

@@ -58,6 +58,18 @@ def test_bgr_to_qimage_colours():
     assert q.pixelColor(0, 0).blue() == 255 and q.pixelColor(0, 0).red() == 0
 
 
+def test_background_results_reach_lambda_callbacks(qtbot):
+    """Every background result reaches its callback, including lambdas."""
+    from fungus_cv.gui.qt_util import run_task
+
+    results, errors = [], []
+    for i in range(30):
+        run_task(lambda p, s, i=i: i, lambda r: results.append(r))
+        run_task(lambda p, s: 1 / 0, lambda r: None, lambda m: errors.append(m))
+    qtbot.waitUntil(lambda: len(results) == 30 and len(errors) == 30, timeout=20000)
+    assert sorted(results) == list(range(30)) and "ZeroDivisionError" in errors[0]
+
+
 def test_image_view_click_maps_to_pixels(qtbot):
     view = ImageView()
     qtbot.addWidget(view)
@@ -218,3 +230,68 @@ def analyze_page_columns():
     from fungus_cv.gui.pages.analyze import COLUMNS
 
     return COLUMNS
+
+
+def test_sidebar_sections_skip_headers(window):
+    rows = [window.nav.item(r) for r in range(window.nav.count())]
+    headers = [i.text() for i in rows if not i.flags() & Qt.ItemIsSelectable]
+    assert headers[:2] == ["CAPTURE", "MEASURE"]
+    window.go_to("SAM prompts")
+    assert window.stack.currentWidget() is dict(window.pages)["SAM prompts"]
+    window.nav.setCurrentRow(0)  # clicking a header changes nothing
+    assert window.stack.currentWidget() is dict(window.pages)["SAM prompts"]
+
+
+def fake_sam(monkeypatch, calls):
+    from fungus_cv.gui.pages import prompt as prompt_page
+    from fungus_cv.segment.sam2 import Sam2VideoSegmenter
+
+    def segment_single(self, image, prompt):
+        calls.append((self.model_name, prompt))
+        mask = np.zeros(image.shape[:2], bool)
+        x, y = (int(v) for v in prompt.points[0])
+        mask[y - 20:y + 20, x - 20:x + 20] = True
+        return mask
+
+    monkeypatch.setattr(Sam2VideoSegmenter, "segment_single", segment_single)
+    monkeypatch.setattr(prompt_page, "preload_model_modules", lambda methods: None)
+
+
+def test_prompt_page_clicks_preview_and_save(window, qtbot, experiment, monkeypatch):
+    from fungus_cv.segment.prompts import Prompts
+
+    calls = []
+    fake_sam(monkeypatch, calls)
+    build_experiment(experiment, minutes=range(0, 4), bump_at=-1)
+    window.open_experiment(experiment.root)
+    prompts_page = page(window, "SAM prompts")
+    qtbot.waitUntil(lambda: prompts_page.frame is not None, timeout=20000)
+    assert prompts_page.index == 3  # starts on the last frame
+
+    prompts_page.model.setCurrentText("facebook/sam2.1-hiera-tiny")
+    prompts_page._clicked(600, 800, Qt.LeftButton.value)
+    qtbot.waitUntil(lambda: prompts_page.mask is not None, timeout=20000)
+    assert prompts_page.mask.sum() == 1600 and calls[-1][0].endswith("tiny")
+    prompts_page._clicked(300, 300, Qt.RightButton.value)
+    qtbot.waitUntil(lambda: calls[-1][1].labels == [1, 0], timeout=20000)
+    prompts_page.save_prompt()
+
+    saved = Prompts.load(experiment.root / "prompts.json")
+    frame_file = Experiment(experiment.root).read_frames()[3]["file"]
+    assert [p.frame_file for p in saved.frames] == [frame_file]
+    assert saved.frames[0].labels == [1, 0] and prompts_page.prompted.count() == 1
+
+    prompts_page.use_sam()
+    cfg = Experiment(experiment.root).config.analysis.target
+    assert cfg.method == "sam2" and cfg.sam2.model.endswith("tiny")
+
+    qtbot.waitUntil(lambda: not prompts_page.loading, timeout=20000)
+    assert prompts_page.index == 3  # reloading the config keeps the frame the user is on
+    prompts_page.show_frame(1)
+    qtbot.waitUntil(lambda: prompts_page.index == 1, timeout=20000)
+    assert prompts_page.points == [] and not prompts_page.remove_btn.isEnabled()
+    prompts_page._jump(prompts_page.prompted.item(0))
+    qtbot.waitUntil(lambda: prompts_page.index == 3, timeout=20000)
+    assert prompts_page.labels == [1, 0]  # the saved prompt comes back
+    prompts_page.remove_prompt()
+    assert Prompts.load(experiment.root / "prompts.json").frames == []

@@ -113,6 +113,10 @@ class Task(QRunnable):
 
 
 _ANALYSIS_POOL: QThreadPool | None = None
+# Signal objects of tasks whose result hasn't reached the main thread yet. The pool deletes a
+# finished task, and without this its signals could be freed before the queued result is
+# delivered; callbacks without their own Qt object (lambdas) would then silently never run.
+_PENDING: set = set()
 
 
 def analysis_pool() -> QThreadPool:
@@ -130,12 +134,16 @@ def run_task(fn: Callable, on_done=None, on_failed=None, on_progress=None,
     """Run ``fn`` in the background. ``pool="io"`` is for camera/permission checks, which
     may wait on the user and must not hold up analysis."""
     task = Task(fn)
+    signals = task.signals
+    _PENDING.add(signals)
     if on_done:
-        task.signals.done.connect(on_done)
+        signals.done.connect(on_done)
     if on_failed:
-        task.signals.failed.connect(on_failed)
+        signals.failed.connect(on_failed)
     if on_progress:
-        task.signals.progress.connect(on_progress)
+        signals.progress.connect(on_progress)
+    signals.done.connect(lambda _: _PENDING.discard(signals))
+    signals.failed.connect(lambda _: _PENDING.discard(signals))
     (analysis_pool() if pool == "analysis" else QThreadPool.globalInstance()).start(task)
     return task
 

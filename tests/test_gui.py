@@ -454,3 +454,99 @@ def test_train_page_trains_evaluates_uses_and_cancels(window, qtbot, experiment,
     qtbot.waitUntil(lambda: train_page.task is None, timeout=120000)
     assert "cancelled" in train_page.message.text()
     assert not (tmp_path / "models" / "dye-v2" / "model.pt").exists()
+
+
+def test_study_page_edit_save_run_reopen(window, qtbot, tmp_path):
+    from fungus_cv.analyze.study import load_study
+
+    from .test_study import fake_experiment
+
+    for i in range(1, 4):
+        fake_experiment(tmp_path, f"control{i}", 70 + i, 0.20 + 0.01 * i, 24, seed=i)
+        fake_experiment(tmp_path, f"treated{i}", 70 + i, 0.40 + 0.01 * i, 24, seed=10 + i)
+    study = page(window, "Study")
+    study.new_study(tmp_path / "moss.yaml")
+    for cond in ("control", "treated"):
+        for i in range(1, 4):
+            study.add_experiment(tmp_path / f"{cond}{i}", condition=cond)
+    assert study._cell(0, 0) == "control1"  # stored relative to the study file
+    study.metric.setCurrentText("coverage_pct")
+    study.params.setText("K, r")
+    study.reference.setCurrentText("control")
+    study.time_unit.setCurrentText("h")
+    study.bootstrap.setValue(50)
+    study.run()
+    qtbot.waitUntil(lambda: study.result is not None or "b00020" in study.message.text(),
+                    timeout=120000)
+    assert study.result is not None, study.message.text()
+    spec = load_study(tmp_path / "moss.yaml")
+    assert spec.reference == "control" and spec.params == ["K", "r"]
+    assert len(spec.experiments) == 6 and spec.bootstrap == 50
+    assert study.conditions.rowCount() == 4 and study.comparisons.rowCount() == 2
+    assert study.replicates.rowCount() == 6
+    assert study.curves.image is not None and study.parameters.image is not None
+    assert "Welch" in study.methods.toPlainText()
+
+    reopened = StudyPage_fresh(window)
+    reopened.open_study(tmp_path / "moss.yaml")
+    assert reopened.experiments.rowCount() == 6
+    assert reopened.reference.currentText() == "control"
+    assert reopened.params.text() == "K, r"
+
+    study.experiments.setItem(0, 1, study.experiments.item(0, 1).__class__(""))
+    assert not study.save()  # an empty condition is refused, the file is kept
+    assert len(load_study(tmp_path / "moss.yaml").experiments) == 6
+
+
+def StudyPage_fresh(window):  # noqa: N802
+    from fungus_cv.gui.pages.study import StudyPage
+
+    return StudyPage(window.state)
+
+
+def test_validation_page_hand_measurements_and_suite(window, qtbot, experiment, tmp_path):
+    import csv
+
+    import yaml
+
+    from fungus_cv.analyze.pipeline import analyze
+
+    heights = build_experiment(experiment, minutes=range(0, 6), bump_at=-1)
+    analyze(Experiment(experiment.root))
+    window.open_experiment(experiment.root)
+    validation = page(window, "Validation")
+
+    template = tmp_path / "hand.csv"
+    validation.template_count.setValue(6)
+    validation.make_template(template)
+    with open(template, newline="") as f:
+        rows = list(csv.DictReader(f))
+    files = [r["file"].split("/")[-1] for r in Experiment(experiment.root).read_frames()]
+    for row in rows:
+        row["value"] = heights[files.index(row["frame"])] * syn.MM_PER_PX
+    with open(template, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    validation.validate()
+    qtbot.waitUntil(lambda: validation.agreement is not None, timeout=60000)
+    assert validation.agreement.n == 6 and "Bias" in validation.stats.text()
+    assert validation.agreement_chart.image is not None
+
+    validation.new_suite(tmp_path / "template_suite.yaml")
+    assert (tmp_path / "template_suite.yaml").exists()
+    suite = tmp_path / "suite.yaml"
+    suite.write_text(yaml.safe_dump({"name": "gui", "cases": [
+        {"name": "dye", "experiment": str(experiment.root), "checks": [
+            {"type": "measurements", "hand": str(template),
+             "expect": {"bias": {"abs_max": 0.5, "max_drift": 0.1}}}]}]}))
+    validation.suite_path.setText(str(suite))
+    validation.save_baseline.setChecked(True)
+    validation.run_suite()
+    qtbot.waitUntil(lambda: validation.suite_result is not None, timeout=120000)
+    assert "1/1 checks passed" in validation.suite_summary.text()
+    assert "baseline saved" in validation.suite_summary.text()
+    assert validation.suite_table.rowCount() == 1
+    assert validation.suite_table.item(0, 5).text() == "pass"
+    validation.only_checked.setChecked(False)
+    assert validation.suite_table.rowCount() > 5

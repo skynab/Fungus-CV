@@ -166,15 +166,22 @@ def preload_modules() -> None:
     import scipy.stats  # noqa: F401
 
     import fungus_cv.analyze.compare  # noqa: F401
+    import fungus_cv.analyze.exclusions  # noqa: F401
+    import fungus_cv.analyze.fit  # noqa: F401
     import fungus_cv.analyze.overlay  # noqa: F401
     import fungus_cv.analyze.pipeline  # noqa: F401
     import fungus_cv.analyze.report  # noqa: F401
+    import fungus_cv.analyze.study  # noqa: F401
+    import fungus_cv.analyze.suite  # noqa: F401
     import fungus_cv.analyze.validate  # noqa: F401
     import fungus_cv.capture.camera  # noqa: F401
     import fungus_cv.capture.diagnostics  # noqa: F401
     import fungus_cv.capture.permissions  # noqa: F401
     import fungus_cv.capture.power  # noqa: F401
     import fungus_cv.capture.scheduler  # noqa: F401
+    import fungus_cv.learn.active  # noqa: F401
+    import fungus_cv.learn.dataset  # noqa: F401
+    import fungus_cv.learn.export  # noqa: F401
     import fungus_cv.measure.centerline  # noqa: F401
     import fungus_cv.segment.color  # noqa: F401
     import fungus_cv.segment.prompts  # noqa: F401

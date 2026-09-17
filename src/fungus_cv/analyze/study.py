@@ -56,8 +56,8 @@ COMPARED_SETTINGS = ("align", "rectify", "lighting", "target", "measure", "uncer
 class StudyExperiment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    path: str  # experiment folder, relative to the study file
-    condition: str
+    path: str = Field(min_length=1)  # experiment folder, relative to the study file
+    condition: str = Field(min_length=1)
     replicate: str | None = None  # default: position within its condition
     plot: str | None = None  # for field experiments with several plots
     t0: datetime | None = None  # start of this replicate (e.g. inoculation); default first frame

@@ -30,7 +30,9 @@ from fungus_cv.gui.pages.labels import LabelsPage
 from fungus_cv.gui.pages.prompt import PromptPage
 from fungus_cv.gui.pages.report import ReportPage
 from fungus_cv.gui.pages.setup import SetupPage
+from fungus_cv.gui.pages.study import StudyPage
 from fungus_cv.gui.pages.train import TrainPage
+from fungus_cv.gui.pages.validation import ValidationPage
 from fungus_cv.gui.qt_util import APP_NAME, log_dir, preload_modules, show_error
 from fungus_cv.gui.state import AppState
 
@@ -62,6 +64,10 @@ class MainWindow(QMainWindow):
             ("Models", [
                 ("Labels", LabelsPage(self.state)),
                 ("Train models", TrainPage(self.state)),
+            ]),
+            ("Results", [
+                ("Study", StudyPage(self.state)),
+                ("Validation", ValidationPage(self.state)),
             ]),
             ("This computer", [
                 ("Diagnostics", DoctorPage(self.state)),

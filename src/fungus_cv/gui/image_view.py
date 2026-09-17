@@ -15,12 +15,17 @@ class ImageView(QGraphicsView):
     double-click fits.
 
     Emits ``clicked(x, y, button)`` and ``dragged(x0, y0, x1, y1)`` in full-resolution pixel
-    coordinates (pixel centres are integers), so annotations are independent of zoom.
+    coordinates (pixel centres are integers), so annotations are independent of zoom. With
+    ``paint_enabled``, left/right drags emit ``stroke(x, y, button, phase)`` instead
+    (phase: 0 press, 1 move, 2 release), for brushes.
     """
+
+    STROKE_PRESS, STROKE_MOVE, STROKE_RELEASE = 0, 1, 2
 
     clicked = Signal(float, float, int)
     dragged = Signal(float, float, float, float)
     hovered = Signal(float, float)
+    stroke = Signal(float, float, int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -35,14 +40,14 @@ class ImageView(QGraphicsView):
         # Pixel (0, 0) covers [-0.5, 0.5]: shift so scene coordinates equal pixel coordinates.
         self._pixmap_item.setOffset(-0.5, -0.5)
         self.scene().addItem(self._pixmap_item)
-        self._mask_item = QGraphicsPixmapItem()
-        self._mask_item.setOffset(-0.5, -0.5)
-        self._mask_item.setZValue(1)
-        self.scene().addItem(self._mask_item)
+        self._mask_items: dict[int, QGraphicsPixmapItem] = {}
+        self._mask_item = self._mask_layer(0)
         self._overlays = []
         self._press = None
         self._pan = None
         self.drag_enabled = False
+        self.paint_enabled = False
+        self._painting: int | None = None  # mouse button of the stroke in progress
         self._has_image = False
         self._rubber = None
 
@@ -60,9 +65,21 @@ class ImageView(QGraphicsView):
         if first or not keep_view:
             self.fit()
 
-    def set_mask(self, mask: np.ndarray | None, color=(255, 0, 255), alpha: int = 110) -> None:
+    def _mask_layer(self, layer: int) -> QGraphicsPixmapItem:
+        if layer not in self._mask_items:
+            item = QGraphicsPixmapItem()
+            item.setOffset(-0.5, -0.5)
+            item.setZValue(1 + 0.1 * layer)
+            self.scene().addItem(item)
+            self._mask_items[layer] = item
+        return self._mask_items[layer]
+
+    def set_mask(self, mask: np.ndarray | None, color=(255, 0, 255), alpha: int = 110,
+                 layer: int = 0) -> None:
+        """Tint ``mask`` pixels; higher ``layer`` numbers are drawn on top (e.g. a proposal)."""
+        item = self._mask_layer(layer)
         if mask is None:
-            self._mask_item.setPixmap(QPixmap())
+            item.setPixmap(QPixmap())
             return
         rgba = np.zeros((*mask.shape, 4), np.uint8)
         rgba[mask] = (*color, alpha)
@@ -70,7 +87,7 @@ class ImageView(QGraphicsView):
 
         h, w = mask.shape
         qimg = QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888).copy()
-        self._mask_item.setPixmap(QPixmap.fromImage(qimg))
+        item.setPixmap(QPixmap.fromImage(qimg))
 
     def fit(self) -> None:
         if self._has_image:
@@ -138,7 +155,12 @@ class ImageView(QGraphicsView):
             self.setCursor(Qt.ClosedHandCursor)
             return
         if event.button() in (Qt.LeftButton, Qt.RightButton) and self._has_image:
-            self._press = (self.mapToScene(event.position().toPoint()), event.button())
+            scene = self.mapToScene(event.position().toPoint())
+            if self.paint_enabled:
+                self._painting = int(event.button().value)
+                self.stroke.emit(scene.x(), scene.y(), self._painting, self.STROKE_PRESS)
+                return
+            self._press = (scene, event.button())
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):  # noqa: N802
@@ -150,6 +172,9 @@ class ImageView(QGraphicsView):
             return
         scene = self.mapToScene(event.position().toPoint())
         self.hovered.emit(scene.x(), scene.y())
+        if self._painting is not None:
+            self.stroke.emit(scene.x(), scene.y(), self._painting, self.STROKE_MOVE)
+            return
         if self._press is not None and self.drag_enabled:
             start = self._press[0]
             rect = QRectF(start, scene).normalized()
@@ -164,6 +189,11 @@ class ImageView(QGraphicsView):
         if self._pan is not None:
             self._pan = None
             self.unsetCursor()
+            return
+        if self._painting is not None:
+            scene = self.mapToScene(event.position().toPoint())
+            self.stroke.emit(scene.x(), scene.y(), self._painting, self.STROKE_RELEASE)
+            self._painting = None
             return
         if self._press is not None:
             start, button = self._press

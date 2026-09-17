@@ -26,6 +26,7 @@ from fungus_cv.gui.pages.camera import CameraPage
 from fungus_cv.gui.pages.capture import CapturePage
 from fungus_cv.gui.pages.doctor import DoctorPage
 from fungus_cv.gui.pages.experiment import ExperimentPage
+from fungus_cv.gui.pages.labels import LabelsPage
 from fungus_cv.gui.pages.prompt import PromptPage
 from fungus_cv.gui.pages.report import ReportPage
 from fungus_cv.gui.pages.setup import SetupPage
@@ -56,6 +57,9 @@ class MainWindow(QMainWindow):
                 ("SAM prompts", PromptPage(self.state)),
                 ("Analyze", AnalyzePage(self.state)),
                 ("Report", ReportPage(self.state)),
+            ]),
+            ("Models", [
+                ("Labels", LabelsPage(self.state)),
             ]),
             ("This computer", [
                 ("Diagnostics", DoctorPage(self.state)),

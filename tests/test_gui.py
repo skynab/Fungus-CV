@@ -295,3 +295,107 @@ def test_prompt_page_clicks_preview_and_save(window, qtbot, experiment, monkeypa
     assert prompts_page.labels == [1, 0]  # the saved prompt comes back
     prompts_page.remove_prompt()
     assert Prompts.load(experiment.root / "prompts.json").frames == []
+
+
+def test_image_view_paint_strokes(qtbot):
+    view = ImageView()
+    qtbot.addWidget(view)
+    view.resize(400, 300)
+    view.show()
+    view.set_image(np.zeros((300, 400, 3), np.uint8))
+    view.paint_enabled = True
+    events = []
+    view.stroke.connect(lambda x, y, b, phase: events.append((round(x), round(y), b, phase)))
+    clicks = []
+    view.clicked.connect(lambda *a: clicks.append(a))
+    qtbot.mousePress(view.viewport(), Qt.LeftButton, pos=QPoint(100, 100))
+    qtbot.mouseMove(view.viewport(), QPoint(150, 120))
+    qtbot.mouseRelease(view.viewport(), Qt.LeftButton, pos=QPoint(150, 120))
+    assert [e[3] for e in events][0] == ImageView.STROKE_PRESS
+    assert events[-1][3] == ImageView.STROKE_RELEASE and not clicks
+    assert abs(events[0][0] - 100) < 3 and abs(events[-1][0] - 150) < 3
+
+
+def test_labels_page_add_paint_sam_save_rank(window, qtbot, experiment, tmp_path, monkeypatch):
+    from fungus_cv.analyze.compare import list_runs
+    from fungus_cv.analyze.pipeline import analyze
+    from fungus_cv.learn.dataset import Dataset
+
+    from .test_active import SOFT, blueness_prob
+    from .test_active import build as build_soft
+
+    calls = []
+    fake_sam(monkeypatch, calls)
+    monkeypatch.setattr("fungus_cv.gui.pages.labels.preload_model_modules", lambda m: None)
+    build_soft(experiment)
+    analyze(Experiment(experiment.root))
+    text = experiment.config_path.read_text().replace("lower: [95, 60, 30]",
+                                                      "lower: [95, 150, 30]", 1)
+    experiment.config_path.write_text(text)
+    analyze(Experiment(experiment.root))
+    loose, tight = (r.run_id for r in list_runs(Experiment(experiment.root)))
+    window.open_experiment(experiment.root)
+
+    labels = page(window, "Labels")
+    labels.create_dataset(tmp_path / "ds")
+    assert labels.dataset is not None and labels.add_btn.isEnabled()
+    labels.add_frames(method="suggest", run=loose, against=tight, count=2)
+    qtbot.waitUntil(lambda: not labels.busy, timeout=30000)
+    assert labels.table.rowCount() == 2, labels.message.text()
+    assert labels.index == 0 and labels.image is not None
+    assert "priority" in labels.info.text()
+    assert len(SOFT) == 2
+
+    # Brush: paint a stroke, erase part of it, undo the erase.
+    labels.mask[:] = False
+    labels._stroke(20, 20, Qt.LeftButton.value, ImageView.STROKE_PRESS)
+    labels._stroke(60, 20, Qt.LeftButton.value, ImageView.STROKE_MOVE)
+    labels._stroke(60, 20, Qt.LeftButton.value, ImageView.STROKE_RELEASE)
+    painted = labels.mask.sum()
+    assert painted > 40 * 17 and labels.mask[20, 40] and labels.dirty
+    labels._stroke(40, 20, Qt.RightButton.value, ImageView.STROKE_PRESS)
+    labels._stroke(40, 20, Qt.RightButton.value, ImageView.STROKE_RELEASE)
+    assert not labels.mask[20, 40]
+    labels.undo()
+    assert labels.mask.sum() == painted
+
+    # SAM clicks: a 40x40 square proposal, added to the painted stroke.
+    labels.sam_mode.setChecked(True)
+    assert not labels.view.paint_enabled
+    labels._clicked(150, 200, Qt.LeftButton.value)
+    qtbot.waitUntil(lambda: labels.proposal is not None, timeout=20000)
+    labels.apply_proposal("add")
+    assert labels.mask.sum() == painted + 1600 and labels.proposal is None
+
+    first_id = labels.items[0].id
+    labels.go(1)  # moving on saves the edited item
+    ds = Dataset.open(tmp_path / "ds")
+    assert ds.get(first_id).reviewed
+    assert ds.load_mask(ds.get(first_id)).sum() == painted + 1600
+
+    labels.unreviewed_only.setChecked(True)
+    assert labels.table.rowCount() == 1
+    labels.save_item()
+    assert labels.table.rowCount() == 0
+
+    labels.unreviewed_only.setChecked(False)
+    for item in labels.dataset.items:
+        item.reviewed = False
+    labels.dataset.save()
+    labels.rank(None, prob_fn=blueness_prob, threshold=0.5)
+    qtbot.waitUntil(lambda: not labels.busy, timeout=30000)
+    priorities = [i.priority for i in labels.items]
+    assert all(p is not None for p in priorities) and priorities == sorted(priorities,
+                                                                           reverse=True)
+
+    other = LabelsPage_reopen(window, tmp_path / "ds")
+    assert other.table.rowCount() == 2
+
+
+def LabelsPage_reopen(window, path):  # noqa: N802 - reads like the page it builds
+    from fungus_cv.gui.pages.labels import LabelsPage
+
+    fresh = LabelsPage(window.state)
+    fresh.on_shown()  # reopens the last dataset
+    assert fresh.dataset is not None and fresh.dataset.root.resolve() == path.resolve()
+    return fresh

@@ -539,10 +539,44 @@ experiments/dye-test-1/
 - `keep_awake: true` stops the computer from sleeping while it's idle. Closing a laptop lid can still put it to sleep, so change that in the power settings.
 - If a run is interrupted, restart it with the same `start_at` in `config.yaml`. Capture continues on the original schedule.
 - The camera is released between shots for intervals over 2 minutes, which helps it recover after being unplugged.
-- To start capture automatically after a reboot:
-  - **Windows:** Task Scheduler → *At startup* → run `.venv\Scripts\fungus.exe capture C:\path\to\experiment`
-  - **macOS:** a `launchd` agent in `~/Library/LaunchAgents` with `RunAtLoad` and `KeepAlive`. The Python you run needs camera permission.
-  - **Linux:** a `systemd --user` service with `Restart=on-failure`.
+
+### Is the run still healthy?
+
+Capture writes a heartbeat (`status.json`) every round: when it last took a photo, when the next is due, how many were saved or failed, how many slots were skipped and how much disk is left.
+
+```bash
+fungus health experiments/moss-1                      # check once (exit 1 if something is wrong)
+fungus health experiments/moss-1 --watch --every 30m --webhook https://hooks.example/...
+fungus health experiments/moss-1 --watch --on-alert 'mail -s "$FUNGUS_SUMMARY" me@example.com'
+```
+
+| Check | Warning | Problem |
+|---|---|---|
+| capture | no heartbeat for 2 intervals | none for 5 intervals: the run looks dead |
+| frames | last photo over 2 intervals ago | over 5 intervals ago, or none at all |
+| camera errors | 1–2 failed attempts recently | 3 or more |
+| schedule | slots skipped (computer asleep or busy) | — |
+| image quality | brightness off by more than 40% from the first frame, nearly black, or sharpness below 40% of the first frame | — |
+| disk | room for fewer than 50 more photos | below `min_free_disk_mb`: capture stops |
+
+- `--watch` reports only when the state **changes**, and sends a "recovered" alert when it clears, so a long run doesn't spam you.
+- `--webhook` POSTs JSON (with a `text` field, so Slack-style hooks show it directly). `--on-alert` runs any command with `FUNGUS_SUMMARY`, `FUNGUS_LEVEL`, `FUNGUS_EXPERIMENT` and `FUNGUS_JSON` set — that's how to send email.
+- An alert that fails to send is logged; it never stops the checks.
+
+### Starting capture automatically
+
+```bash
+fungus service install experiments/moss-1 --dry-run     # show what would be written
+fungus service install experiments/moss-1               # asks before installing
+fungus service install experiments/moss-1 --action health --extra '--webhook https://...'
+fungus service status experiments/moss-1
+fungus service uninstall experiments/moss-1
+```
+
+Writes the right file for your system and registers it: a **launchd agent** on macOS (runs at login, restarted if it exits), a **systemd user unit** on Linux (`Restart=on-failure`), or a **Task Scheduler** task on Windows (at logon). It always prints the file and the commands first and asks before installing anything.
+
+- These run while you are logged in. For a machine that captures while logged out: `loginctl enable-linger $USER` on Linux, or tick "Run whether user is logged on or not" in Task Scheduler on Windows.
+- On macOS the program that runs needs camera permission; see *Troubleshooting cameras*.
 
 ## Development
 

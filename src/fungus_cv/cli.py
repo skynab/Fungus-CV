@@ -1031,6 +1031,165 @@ def sensitivity(
         typer.echo(f"wrote {f}")
 
 
+service_app = typer.Typer(help="Run capture (or health checks) automatically at login.",
+                          no_args_is_help=True)
+app.add_typer(service_app, name="service")
+
+
+@service_app.command("install")
+def service_install(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    action: str = typer.Option("capture", help="capture | health (a health watch)."),
+    extra: str = typer.Option("", help="Extra arguments for the command, e.g. "
+                              "'--webhook https://...' for health."),
+    register: bool = typer.Option(True, help="Also register it with the system."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be written."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation."),
+) -> None:
+    """Install a login service so capture starts by itself (and restarts if it stops)."""
+    import shlex
+
+    from fungus_cv.capture import service as service_mod
+
+    exp = _load_experiment(experiment)
+    if action not in ("capture", "health"):
+        typer.secho("action must be capture or health", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    arguments = shlex.split(extra)
+    try:
+        plan = service_mod.plan(exp.root, action, arguments)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Service: {plan.name}")
+    typer.echo(f"File:    {plan.path}")
+    typer.echo("Runs:    " + " ".join(service_mod.fungus_command(exp.root, action, arguments)))
+    for command in plan.commands:
+        typer.echo("Then:    " + " ".join(command))
+    if plan.note:
+        typer.echo(f"Note:    {plan.note}")
+    if dry_run:
+        typer.echo("\n--- file contents ---")
+        typer.echo(plan.contents)
+        return
+    if not yes and not typer.confirm("Install this service on this computer?", default=False):
+        typer.echo("Nothing installed.")
+        raise typer.Exit(1)
+    result = service_mod.install(exp.root, action, arguments, register=register)
+    for line in result.output:
+        typer.echo(line)
+    for message in result.errors:
+        typer.secho(message, fg=typer.colors.RED, err=True)
+    typer.echo(f"Wrote {plan.path}" + (" and registered it." if result.registered
+                                       else " (not registered)."))
+    typer.echo(f"Remove it with `fungus service uninstall {exp.root}`"
+               + (f" --action {action}" if action != "capture" else "") + ".")
+    if result.errors:
+        raise typer.Exit(1)
+
+
+@service_app.command("uninstall")
+def service_uninstall(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    action: str = typer.Option("capture", help="capture | health."),
+) -> None:
+    """Remove the login service for this experiment."""
+    from fungus_cv.capture import service as service_mod
+
+    exp = _load_experiment(experiment)
+    result = service_mod.uninstall(exp.root, action)
+    for line in result.output:
+        typer.echo(line)
+    typer.echo(f"Removed {result.plan.path}" if result.wrote
+               else f"No service file at {result.plan.path}")
+
+
+@service_app.command("status")
+def service_status(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+) -> None:
+    """Is a login service installed for this experiment?"""
+    from fungus_cv.capture import service as service_mod
+
+    exp = _load_experiment(experiment)
+    for action in ("capture", "health"):
+        try:
+            plan = service_mod.plan(exp.root, action)
+        except ValueError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(1) from exc
+        state = "installed" if plan.path.exists() else "not installed"
+        typer.echo(f"{action:8s} {state}: {plan.path}")
+
+
+@app.command()
+def health(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    watch: bool = typer.Option(False, help="Keep checking and alert when something changes."),
+    every: str = typer.Option("10m", help="How often to check with --watch."),
+    webhook: str | None = typer.Option(None, help="POST alerts as JSON to this URL (Slack, "
+                                       "ntfy, your own server)."),
+    on_alert: str | None = typer.Option(None, help="Run this command on an alert; the details "
+                                        "are in FUNGUS_SUMMARY, FUNGUS_LEVEL, FUNGUS_JSON..."),
+    quality_frames: int = typer.Option(10, help="How many recent photos to judge quality on."),
+) -> None:
+    """Check an unattended run: is capture alive, are photos arriving and usable, is there room?"""
+    import time as time_module
+
+    from fungus_cv.capture import health as health_mod
+
+    exp = _load_experiment(experiment)
+    _setup_logging()
+    colours = {"ok": typer.colors.GREEN, "warning": typer.colors.YELLOW,
+               "problem": typer.colors.RED}
+
+    def show(report) -> None:
+        for c in report.checks:
+            mark = {"ok": "OK  ", "warning": "WARN", "problem": "FAIL"}[c.level]
+            typer.secho(f"[{mark}] {c.name}: {c.detail}", fg=colours[c.level])
+            if c.fix and c.level != "ok":
+                typer.echo(f"       -> {c.fix}")
+
+    if not watch:
+        report = health_mod.check(exp, quality_frames=quality_frames)
+        show(report)
+        typer.secho(report.summary(), fg=colours[report.level])
+        if not report.ok:
+            raise typer.Exit(1 if report.level == "problem" else 0)
+        return
+
+    seconds = parse_duration(every)
+    typer.echo(f"Checking {exp.config.name} every {every}; Ctrl+C to stop."
+               + (" Alerts go to the webhook." if webhook else "")
+               + (" On alert: " + on_alert if on_alert else ""))
+    previous = None
+    try:
+        while True:
+            report = health_mod.check(_reload(exp), quality_frames=quality_frames)
+            state = report.level
+            if state != previous:  # only tell on a change, not every time
+                show(report)
+                if state != "ok":
+                    errors = health_mod.notify(report, "problem", webhook, on_alert)
+                elif previous is not None:
+                    errors = health_mod.notify(report, "recovered", webhook, on_alert)
+                else:
+                    errors = []
+                for message in errors:
+                    typer.secho(f"alert failed: {message}", fg=typer.colors.RED, err=True)
+                previous = state
+            time_module.sleep(seconds)
+    except KeyboardInterrupt:
+        typer.echo("Stopped.")
+
+
+def _reload(exp):
+    """Re-read config.yaml and frames.csv, so a long watch sees changes."""
+    from fungus_cv.storage import Experiment
+
+    return Experiment(exp.root)
+
+
 @app.command()
 def archive(
     target: Path = typer.Argument(None, help="Experiment folder, or a study YAML file."),

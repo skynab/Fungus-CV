@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from fungus_cv.capture.camera import Camera, CameraError
+from fungus_cv.capture.health import write_heartbeat
 from fungus_cv.config import CameraConfig
 from fungus_cv.quality import mean_brightness, sharpness
 from fungus_cv.storage import Experiment, FrameRecord, encode_image, iso_utc, sha256_bytes
@@ -102,6 +103,7 @@ class CaptureSession:
                     continue
 
                 self.capture_round(slot)
+                self._heartbeat("running", next_due=slot + interval)
                 slot_index += 1
                 if cap.max_frames and self.summary.rounds >= cap.max_frames:
                     self.summary.stopped_reason = "max_frames reached"
@@ -111,6 +113,7 @@ class CaptureSession:
             self.summary.stopped_reason = "low disk space"
         finally:
             self.close()
+            self._heartbeat("finished")
         log.info(
             "capture finished (%s): %d saved, %d failed, %d slot(s) skipped",
             self.summary.stopped_reason or "interrupted",
@@ -127,6 +130,20 @@ class CaptureSession:
     def close(self) -> None:
         for cam in self.cameras.values():
             cam.close()
+
+    def _heartbeat(self, state: str, next_due: datetime | None = None) -> None:
+        """Record progress so `fungus health` can tell a live run from a dead one."""
+        last = self.summary.files[-1] if self.summary.files else ""
+        try:
+            write_heartbeat(
+                self.experiment, state=state, interval_s=self.config.capture.interval,
+                last_frame_utc=iso_utc(self.clock.now()) if last else "",
+                next_due_utc=iso_utc(next_due) if next_due else "",
+                rounds=self.summary.rounds, saved=self.summary.saved,
+                failed=self.summary.failed, skipped_slots=self.summary.skipped_slots,
+                stopped_reason=self.summary.stopped_reason, note=last)
+        except OSError as exc:  # a heartbeat must never stop the capture
+            log.warning("could not write the heartbeat: %s", exc)
 
     # --- internals -----------------------------------------------------------------
 

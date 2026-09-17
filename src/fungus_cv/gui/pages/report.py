@@ -55,6 +55,7 @@ class ReportPage(QWidget):
         self.time_unit.addItems(["auto", "s", "min", "h", "d"])
         self.include_flagged = QCheckBox("Fit flagged frames too")
         self.exclude_jumps = QCheckBox("Leave jumps out of the fits")
+        self.vector = QCheckBox("Also save PDF and SVG (for papers)")
         self.video = QCheckBox("Also make an overlay video")
         self.make_btn = QPushButton("Make report")
         self.make_btn.clicked.connect(self.make)
@@ -66,6 +67,7 @@ class ReportPage(QWidget):
         form.addRow("Time unit", self.time_unit)
         form.addRow("", self.include_flagged)
         form.addRow("", self.exclude_jumps)
+        form.addRow("", self.vector)
         form.addRow("", self.video)
         buttons = QHBoxLayout()
         buttons.addWidget(self.make_btn)
@@ -145,6 +147,7 @@ class ReportPage(QWidget):
             exclude_flags=() if self.include_flagged.isChecked() else DEFAULT_EXCLUDE,
             exclude_jumps=self.exclude_jumps.isChecked(),
             video=self.video.isChecked(),
+            formats=("png", "pdf", "svg") if self.vector.isChecked() else ("png",),
         )
         self.make_btn.setEnabled(False)
         self.message.setText("Fitting models and drawing charts…")

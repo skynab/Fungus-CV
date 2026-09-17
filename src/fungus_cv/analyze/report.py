@@ -13,7 +13,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from fungus_cv.analyze.fit import DEFAULT_MODELS, FitResult, fit_all
+from fungus_cv.analyze.fit import DEFAULT_MODELS, FitResult, best_fit, fit_all
 from fungus_cv.analyze.pipeline import MEASUREMENTS_NAME, RESULTS_DIR
 from fungus_cv.storage import Experiment, iso_utc, parse_iso_utc
 
@@ -21,6 +21,9 @@ log = logging.getLogger(__name__)
 
 TIME_UNITS = {"s": 1.0, "min": 60.0, "h": 3600.0, "d": 86400.0}
 DEFAULT_EXCLUDE = ("align_failed", "blurry")
+# png to look at; pdf and svg keep text and lines sharp at any size, for a paper.
+FIGURE_FORMATS = ("png", "pdf", "svg")
+DEFAULT_FORMATS = ("png",)
 
 # Reference palette (light mode): neutral ink for data, fixed categorical order for fits.
 INK = "#0b0b0b"
@@ -280,6 +283,8 @@ def make_report(
     fps: int = 10,
     exclude_jumps: bool = False,
     plot: str | None = None,
+    formats: tuple[str, ...] = DEFAULT_FORMATS,
+    dpi: int = 150,
     bootstrap: int = 1000,
     errors: str = "auto",
     seed: int = 0,
@@ -371,10 +376,7 @@ def make_report(
                  loc="left", fontsize=12)
     ax.legend(frameon=False, fontsize=9, labelcolor=INK)
     fig.tight_layout()
-    main_png = out_dir / f"{metric}_vs_time.png"
-    fig.savefig(main_png)
-    plt.close(fig)
-    result.files.append(main_png)
+    result.files += save_figure(fig, out_dir, f"{metric}_vs_time", formats, dpi)
 
     # --- quality control: one measure per panel, shared time axis --------------------
     qc = [("mean_brightness", "Brightness (0-255)"), ("align_shift_px", "Alignment shift (px)"),
@@ -390,10 +392,37 @@ def make_report(
     axes[-1].set_xlabel(f"Time since start ({time_unit})", color=INK)
     axes[0].set_title("Quality checks", color=INK, loc="left", fontsize=12)
     fig.tight_layout()
-    qc_png = out_dir / "quality_checks.png"
-    fig.savefig(qc_png)
-    plt.close(fig)
-    result.files.append(qc_png)
+    result.files += save_figure(fig, out_dir, "quality_checks", formats, dpi)
+
+    # --- residuals of the best model, in units of the reported uncertainty ------------
+    best = best_fit(fits)
+    if best is not None and use.sum() > 2:
+        residual = y[use] - best.predict(t[use])
+        scaled = np.isfinite(unc[use]).all() and np.all(unc[use] > 0)
+        fig, (top, bottom) = plt.subplots(2, 1, figsize=(8, 6), dpi=dpi, sharex=True,
+                                          height_ratios=[2, 1])
+        for ax in (top, bottom):
+            _style(ax)
+        top.plot(t[use], y[use], "o", ms=4, color=INK_2, label="measured", zorder=3)
+        grid = np.linspace(max(0.0, t[use].min()), t[use].max(), 300)
+        top.plot(grid, best.predict(grid), color=SERIES[0], lw=2,
+                 label=f"{best.model}: {best.formula}")
+        top.set_ylabel(label, color=INK)
+        top.legend(frameon=False, fontsize=9, labelcolor=INK)
+        top.set_title(f"{where}: best model and what it misses", color=INK, loc="left",
+                      fontsize=12)
+        bottom.axhline(0, color=GRID, lw=2)
+        if scaled:
+            bottom.plot(t[use], residual / unc[use], "o", ms=4, color=SERIES[1])
+            for level in (-2, 2):
+                bottom.axhline(level, color=GRID, lw=1, ls=(0, (6, 3)))
+            bottom.set_ylabel("Residual / uncertainty", color=INK)
+        else:
+            bottom.plot(t[use], residual, "o", ms=4, color=SERIES[1])
+            bottom.set_ylabel(f"Residual ({time_unit})", color=INK)
+        bottom.set_xlabel(f"Time since start ({time_unit})", color=INK)
+        fig.tight_layout()
+        result.files += save_figure(fig, out_dir, "fit_and_residuals", formats, dpi)
 
     summary = {
         "metric": metric, "plot": plot, "time_unit": time_unit, "t0": result.t0_utc,
@@ -416,6 +445,22 @@ def make_report(
                        mp4, fps):
             result.files.append(mp4)
     return result
+
+
+def save_figure(fig, out_dir: Path, stem: str, formats=DEFAULT_FORMATS,
+                dpi: int = 150) -> list[Path]:
+    """Save one figure in each format (png for looking at, pdf/svg for publication)."""
+    import matplotlib.pyplot as plt
+
+    paths = []
+    for fmt in formats:
+        if fmt not in FIGURE_FORMATS:
+            raise ValueError(f"unknown figure format {fmt!r}; use {list(FIGURE_FORMATS)}")
+        path = Path(out_dir) / f"{stem}.{fmt}"
+        fig.savefig(path, dpi=dpi)
+        paths.append(path)
+    plt.close(fig)
+    return paths
 
 
 def _style(ax) -> None:

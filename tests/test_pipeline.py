@@ -117,3 +117,31 @@ def test_cli_analyze_and_report(experiment, tmp_path):
     sheet = tmp_path / "markers.png"
     result = runner.invoke(app, ["markers", str(sheet), "--dpi", "100"])
     assert result.exit_code == 0 and sheet.exists()
+
+
+def test_report_writes_vector_figures_and_residuals(experiment):
+    build_experiment(experiment, minutes=range(1, 14), bump_at=-1)
+    exp = Experiment(experiment.root)
+    analyze(exp)
+    result = make_report(exp, t0=T0, formats=("png", "pdf", "svg"), bootstrap=0)
+    names = {p.name for p in result.files}
+    for ext in ("png", "pdf", "svg"):
+        assert f"extent_mm_vs_time.{ext}" in names and f"quality_checks.{ext}" in names
+        assert f"fit_and_residuals.{ext}" in names
+    svg = next(p for p in result.files if p.name == "extent_mm_vs_time.svg")
+    assert svg.read_text(encoding="utf-8").lstrip().startswith("<?xml")  # vector, not a bitmap
+    pdf = next(p for p in result.files if p.name.endswith("fit_and_residuals.pdf"))
+    assert pdf.read_bytes().startswith(b"%PDF")
+
+    default = make_report(exp, t0=T0, bootstrap=0)
+    assert not any(str(p).endswith((".pdf", ".svg")) for p in default.files)
+
+    with pytest.raises(ValueError, match="unknown figure format"):
+        make_report(exp, t0=T0, formats=("eps",), bootstrap=0)
+
+
+def test_report_cli_rejects_unknown_format(experiment):
+    build_experiment(experiment, minutes=range(1, 4), bump_at=-1)
+    analyze(Experiment(experiment.root))
+    result = CliRunner().invoke(app, ["report", str(experiment.root), "--format", "eps"])
+    assert result.exit_code == 1 and "unknown figure format" in result.output

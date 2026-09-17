@@ -142,8 +142,9 @@ With very strongly correlated errors there are few effectively independent frame
 
 Output files:
 
-- `results/report/`: the main plot, a quality-check plot, `fits.json` (every statistic above) and an optional overlay video.
+- `results/report/`: the main plot, a quality-check plot, **`fit_and_residuals`** (the best model with its residuals in units of the reported uncertainty underneath — residuals should scatter within about ±2 with no pattern), `fits.json` (every statistic above) and an optional overlay video.
 - Frames where the front moves back by more than 3σ are circled as worth checking.
+- **Figures for a paper:** `--format pdf --format svg` (repeatable, `png` by default) writes vector figures that stay sharp at any size; `--dpi` sets the png resolution. In the app, tick "Also save PDF and SVG". Study figures are always written as png, pdf and svg.
 
 ## How much do the settings matter?
 

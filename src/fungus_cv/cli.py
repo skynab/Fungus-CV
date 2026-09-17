@@ -560,10 +560,20 @@ def report(
                                   "(0 = off)."),
     errors: str = typer.Option("auto", help="Frame errors: auto (choose by AICc) | iid "
                                "(independent) | ar1 (correlated between neighbouring frames)."),
+    figure_format: list[str] = typer.Option([], "--format", help="Figure format(s): png "
+                                            "(default), pdf, svg. Repeatable; pdf and svg are "
+                                            "vector, for papers."),
+    dpi: int = typer.Option(150, help="Resolution of the png figures."),
 ) -> None:
     """Fit growth models and write plots to results/report/ (one folder per field plot)."""
     from fungus_cv.analyze.fit import DEFAULT_MODELS, MODELS, best_fit, format_params
-    from fungus_cv.analyze.report import DEFAULT_EXCLUDE, list_plots, make_report
+    from fungus_cv.analyze.report import (
+        DEFAULT_EXCLUDE,
+        DEFAULT_FORMATS,
+        FIGURE_FORMATS,
+        list_plots,
+        make_report,
+    )
 
     exp = _load_experiment(experiment)
     _setup_logging()
@@ -571,6 +581,11 @@ def report(
         t0 = t0.astimezone()
     if errors not in ("auto", "iid", "ar1"):
         typer.secho("--errors must be auto, iid or ar1", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    bad_formats = [f for f in figure_format if f not in FIGURE_FORMATS]
+    if bad_formats:
+        typer.secho(f"unknown figure format(s) {bad_formats}; use {list(FIGURE_FORMATS)}",
+                    fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
     unknown = [m for m in model if m not in MODELS]
     if unknown:
@@ -583,6 +598,7 @@ def report(
             exp, metric=metric, t0=t0, time_unit=time_unit,
             exclude_flags=() if include_flagged else DEFAULT_EXCLUDE, video=video,
             exclude_jumps=exclude_jumps, plot=name, models=tuple(model) or DEFAULT_MODELS,
+            formats=tuple(figure_format) or DEFAULT_FORMATS, dpi=dpi,
             bootstrap=bootstrap, errors=errors,
         ) for name in plots]
     except (FileNotFoundError, ValueError) as exc:

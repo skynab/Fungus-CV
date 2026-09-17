@@ -42,6 +42,7 @@ from fungus_cv.analyze.report import (
     _style,
     load_series,
     pick_time_unit,
+    save_figure,
 )
 from fungus_cv.provenance import software_provenance
 from fungus_cv.storage import Experiment, iso_utc, utc_now
@@ -51,6 +52,8 @@ log = logging.getLogger(__name__)
 # Settings that must match across replicates, or differences could come from the analysis.
 COMPARED_SETTINGS = ("align", "rectify", "lighting", "target", "measure", "uncertainty",
                      "front_percentile")
+# Study figures are the paper's figures: vector formats as well as a png to look at.
+STUDY_FORMATS = ("png", "pdf", "svg")
 
 
 class StudyExperiment(BaseModel):
@@ -632,11 +635,7 @@ def _figures(result: StudyResult) -> list[Path]:
                  color=INK, loc="left", fontsize=11)
     ax.legend(frameon=False, fontsize=9, labelcolor=INK)
     fig.tight_layout()
-    for ext in ("png", "svg"):
-        path = result.out_dir / f"curves.{ext}"
-        fig.savefig(path)
-        files.append(path)
-    plt.close(fig)
+    files += save_figure(fig, result.out_dir, "curves", STUDY_FORMATS)
 
     # Parameters: each replicate with its bootstrap interval, and the condition mean with its CI.
     params = study.compared_params
@@ -667,11 +666,7 @@ def _figures(result: StudyResult) -> list[Path]:
     fig.suptitle(f"{study.model} parameters: dots = replicates (95% bootstrap interval), "
                  "diamond = condition mean (95% CI)", color=INK, fontsize=10, x=0.01, ha="left")
     fig.tight_layout()
-    for ext in ("png", "svg"):
-        path = result.out_dir / f"parameters.{ext}"
-        fig.savefig(path)
-        files.append(path)
-    plt.close(fig)
+    files += save_figure(fig, result.out_dir, "parameters", STUDY_FORMATS)
     return files
 
 

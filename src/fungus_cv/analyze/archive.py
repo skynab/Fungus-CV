@@ -102,10 +102,9 @@ def _add_experiment(bundle: _Bundle, experiment: Experiment, prefix: str, frames
         if not path.is_file():
             continue
         relative = path.relative_to(root)
-        kind = relative.parts[1] if len(relative.parts) > 1 else ""
         if "sam2_state" in relative.parts:
             continue  # tracking state belongs to one model version, not to the result
-        if not masks and kind in SKIP_RESULT_PARTS:
+        if not masks and any(part in SKIP_RESULT_PARTS for part in relative.parts):
             continue
         bundle.add_file(path, f"{prefix}{relative.as_posix()}")
 

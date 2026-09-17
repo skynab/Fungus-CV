@@ -145,6 +145,30 @@ Output files:
 - `results/report/`: the main plot, a quality-check plot, `fits.json` (every statistic above) and an optional overlay video.
 - Frames where the front moves back by more than 3σ are circled as worth checking.
 
+## How much do the settings matter?
+
+```bash
+fungus sensitivity experiments/dye-test-1 --list     # what would be varied
+fungus sensitivity experiments/dye-test-1            # re-run with each setting changed
+```
+
+Every variant changes **one** setting a reasonable person might have chosen differently, measures every frame again into `results/sensitivity/<variant>/`, and compares it with your current settings frame by frame. The experiment's own results are never touched.
+
+| Setting varied | Variants |
+|---|---|
+| colour thresholds | wider and narrower by `analysis.uncertainty.hsv_delta`; no morphological clean-up |
+| trained model | probability threshold 0.35 and 0.65 |
+| SAM 2 | mask threshold ±1 |
+| alignment | markers vs image matching (ECC) |
+| lighting | correction on vs off |
+| perspective | rectification on vs off (when markers are measured) |
+| front position | 25th and 75th percentile across the width instead of the median |
+
+- **The number that matters** is the mean change **in units of the reported uncertainty**. Well under 1 u means the choice doesn't change the conclusions; several u means it must be justified in the methods, or the range reported.
+- **Outputs:** `results/sensitivity/sensitivity.csv` (mean, max and signed change, change at the last frame, change in u), `sensitivity.json` (with the full baseline settings) and a bar chart with the 1 u line.
+- **Cost:** each variant measures every frame again. That is quick for colour thresholds and slow for SAM 2; `--variant` runs just one.
+- Variant masks and overlays are deleted afterwards unless you pass `--keep-masks`.
+
 ## Archiving a result (for a paper or a data repository)
 
 ```bash

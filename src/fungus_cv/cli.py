@@ -869,6 +869,76 @@ def study(
 
 
 @app.command()
+def sensitivity(
+    experiment: Path = typer.Argument(..., help="Experiment folder (already analyzed)."),
+    metric: str | None = typer.Option(None, help="Measurement to compare (default: as in "
+                                      "`fungus report`)."),
+    plot: str | None = typer.Option(None, help="Plot to use (field experiments)."),
+    variant: list[str] = typer.Option([], help="Only these variants (repeatable); see --list."),
+    list_variants: bool = typer.Option(False, "--list", help="Show the variants and exit."),
+    keep_masks: bool = typer.Option(False, help="Keep each variant's masks and overlays."),
+    out: Path | None = typer.Option(None, help="Output folder (default: "
+                                    "results/sensitivity)."),
+) -> None:
+    """Re-run the analysis with key settings changed and report how much the results move."""
+    from fungus_cv.analyze import sensitivity as sens
+
+    exp = _load_experiment(experiment)
+    _setup_logging()
+    available = sens.default_variants(exp)
+    if list_variants:
+        for v in available:
+            typer.echo(f"{v.name:26s} {v.description}")
+        return
+    chosen = available
+    if variant:
+        by_name = {v.name: v for v in available}
+        unknown = [v for v in variant if v not in by_name]
+        if unknown:
+            typer.secho(f"unknown variant(s) {unknown}; see --list", fg=typer.colors.RED,
+                        err=True)
+            raise typer.Exit(1)
+        chosen = [by_name[v] for v in variant]
+    if not chosen:
+        typer.secho("nothing to vary for these settings", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    typer.echo(f"Re-analyzing {len(chosen)} variant(s); each one measures every frame again.")
+    try:
+        result = sens.run(exp, metric=metric, plot=plot, variants=chosen, out_dir=out,
+                          keep_masks=keep_masks,
+                          progress=lambda n, total, name: typer.echo(f"  [{n}/{total}] {name}"))
+    except (FileNotFoundError, ValueError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+
+    unc = result.baseline_uncertainty
+    typer.echo(f"{result.metric} (plot {result.plot}): last value {result.baseline_final:.4g}"
+               + (f", mean reported uncertainty {unc:.4g}" if unc == unc else ""))
+    for v in sorted(result.variants, key=lambda v: -(v.mean_abs_change if v.ok and
+                                                     v.mean_abs_change == v.mean_abs_change
+                                                     else -1)):
+        if not v.ok:
+            typer.secho(f"  {v.variant.name:26s} failed: {v.error}", fg=typer.colors.YELLOW)
+            continue
+        in_u = (f"  = {v.change_in_uncertainties:.2f} u"
+                if v.change_in_uncertainties == v.change_in_uncertainties else "")
+        typer.echo(f"  {v.variant.name:26s} mean |change| {v.mean_abs_change:.4g}{in_u}"
+                   f"  (max {v.max_abs_change:.4g}, at the last frame "
+                   f"{v.final_change:+.4g})  — {v.variant.description}")
+    worst = result.largest
+    if worst is not None:
+        typer.echo(f"Largest effect: {worst.variant.description}.")
+        if worst.change_in_uncertainties == worst.change_in_uncertainties:
+            verdict = ("smaller than the reported uncertainty, so the conclusions do not "
+                       "depend on it" if worst.change_in_uncertainties < 1 else
+                       "larger than the reported uncertainty: justify this setting in the "
+                       "methods, or report the range")
+            typer.echo(f"  That is {verdict}.")
+    for f in result.files:
+        typer.echo(f"wrote {f}")
+
+
+@app.command()
 def archive(
     target: Path = typer.Argument(None, help="Experiment folder, or a study YAML file."),
     out: Path = typer.Argument(None, help="Bundle to write, e.g. dye-test-1.zip."),

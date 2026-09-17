@@ -124,10 +124,13 @@ class Analyzer:
     """
 
     def __init__(self, experiment: Experiment, with_segmenter: bool = True,
-                 require_annotations: bool = True):
+                 require_annotations: bool = True, results_dir: Path | None = None):
         self.experiment = experiment
         self.cfg = experiment.config.analysis
-        self.results_dir = experiment.root / RESULTS_DIR
+        # A different results folder keeps trial runs (e.g. `fungus sensitivity`) apart from
+        # the experiment's own results. It must stay inside the experiment, because mask and
+        # overlay paths are recorded relative to it.
+        self.results_dir = Path(results_dir) if results_dir else experiment.root / RESULTS_DIR
         self.measurements_path = self.results_dir / MEASUREMENTS_NAME
 
         frames = frames_for_analysis(experiment)
@@ -316,7 +319,7 @@ class Analyzer:
         ``progress(done, total, stage)`` is called after each frame; ``should_stop()`` is
         checked between frames so a GUI can cancel (finished frames stay saved).
         """
-        self.results_dir.mkdir(exist_ok=True)
+        self.results_dir.mkdir(parents=True, exist_ok=True)
         if force and self.measurements_path.exists():
             self.measurements_path.unlink()
         done = self._existing()

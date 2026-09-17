@@ -43,9 +43,15 @@ class ReportResult:
     files: list[str] = field(default_factory=list)
 
 
-def load_measurements(experiment: Experiment, plot: str | None = None) -> list[dict]:
-    """Measurement rows sorted by time; only ``plot``'s rows if given."""
-    path = experiment.root / RESULTS_DIR / MEASUREMENTS_NAME
+def load_measurements(experiment: Experiment, plot: str | None = None,
+                      results_dir: Path | None = None) -> list[dict]:
+    """Measurement rows sorted by time; only ``plot``'s rows if given.
+
+    ``results_dir`` reads another run's results instead of the experiment's own (used by
+    `fungus sensitivity`).
+    """
+    path = (Path(results_dir) if results_dir else experiment.root / RESULTS_DIR) / \
+        MEASUREMENTS_NAME
     if not path.exists():
         raise FileNotFoundError(f"{path} not found; run `fungus analyze` first")
     with open(path, newline="", encoding="utf-8") as f:
@@ -55,8 +61,8 @@ def load_measurements(experiment: Experiment, plot: str | None = None) -> list[d
     return [r for r in rows if plot is None or r["plot"] == plot]
 
 
-def list_plots(experiment: Experiment) -> list[str]:
-    return sorted({r["plot"] for r in load_measurements(experiment)})
+def list_plots(experiment: Experiment, results_dir: Path | None = None) -> list[str]:
+    return sorted({r["plot"] for r in load_measurements(experiment, results_dir=results_dir)})
 
 
 EDGE_METRICS = ("edge_advance_p95_mm", "edge_advance_max_mm",
@@ -64,7 +70,8 @@ EDGE_METRICS = ("edge_advance_p95_mm", "edge_advance_max_mm",
 
 
 def add_edge_advance(experiment: Experiment, rows: list[dict], plot_name: str,
-                     skip_flags: tuple[str, ...] = DEFAULT_EXCLUDE) -> None:
+                     skip_flags: tuple[str, ...] = DEFAULT_EXCLUDE,
+                     results_dir: Path | None = None) -> None:
     """Add how far the target has spread beyond its first outline in the plot.
 
     The baseline is the first usable frame (in time) with target in the plot. For each later
@@ -79,7 +86,7 @@ def add_edge_advance(experiment: Experiment, rows: list[dict], plot_name: str,
     if plot_name not in plots:
         raise ValueError(f"plot {plot_name!r} is not in annotations.json")
     plot = plots[plot_name]
-    runs_dir = experiment.root / RESULTS_DIR / "runs"
+    runs_dir = (Path(results_dir) if results_dir else experiment.root / RESULTS_DIR) / "runs"
     scales: dict[str, float | None] = {}
     baseline_dist = region = None
     for r in rows:
@@ -214,13 +221,14 @@ def load_series(
     time_unit: str = "auto",
     exclude_flags: tuple[str, ...] = DEFAULT_EXCLUDE,
     exclude_jumps: bool = False,
+    results_dir: Path | None = None,
 ) -> Series:
-    plots = list_plots(experiment)
+    plots = list_plots(experiment, results_dir)
     if plot is None:
         if len(plots) > 1:
             raise ValueError(f"several plots {plots}; choose one")
         plot = plots[0] if plots else "main"
-    rows = load_measurements(experiment, plot)
+    rows = load_measurements(experiment, plot, results_dir)
     if not rows:
         raise ValueError(f"no measurements for plot {plot!r}")
     if metric is None:
@@ -229,7 +237,7 @@ def load_series(
                 metric = candidate
                 break
     if metric in EDGE_METRICS:
-        add_edge_advance(experiment, rows, plot, exclude_flags)
+        add_edge_advance(experiment, rows, plot, exclude_flags, results_dir)
     if metric not in rows[0]:
         raise ValueError(f"unknown metric {metric!r}; columns: {list(rows[0])}")
     if time_unit != "auto" and time_unit not in TIME_UNITS:

@@ -342,7 +342,11 @@ fungus compare experiments/moss-1    # IoU and extent difference between the two
 - **Models:** `sam2.1-hiera-tiny`, `-small` (default), `-base-plus` and `-large` trade speed for accuracy. Weights download on first use.
   - The device (CUDA, Apple GPU or CPU) is picked automatically.
   - On an M1 Pro, `-small` takes about 0.8 s per frame.
-  - New frames re-run tracking from the prompted frame, so each `analyze` gets slower as the run grows (minutes for a few hundred frames).
+- **Incremental tracking:** after each `analyze`, SAM 2's tracking memory is saved with the run's masks (`results/masks/<run>/sam2_state/`, about 7–20 MB).
+  - **Speed:** the next run resumes from that memory, so a new frame costs one frame of tracking however long the time-lapse is. With SAM 2-tiny on an M1 Pro, frame 61 took 1.1 s instead of 56 s for re-tracking from the prompted frame.
+  - **Same results:** resumed masks are pixel-identical to re-tracking from the start, including across a later prompted frame.
+  - **Interruptions:** the state is also saved every 25 frames, so a stopped run continues close to where it stopped.
+  - **Starting over:** the saved state is only used when the model, crop, prompts, transformers/torch versions and every frame tracked so far still match. Otherwise tracking starts again from the prompted frame and the log says why, for example when older photos were imported in between or an earlier frame needs a mask again. Deleting `sam2_state/` also forces this.
 - **Validating:** `fungus compare` accepts any folder of mask PNGs, not just runs. Use it to check SAM against hand-labeled frames before trusting it on a new kind of scene. On synthetic dye, SAM 2-small matched the color threshold with mean IoU 0.991 and read the front **0.21 mm lower** on average; check for similar systematic offsets on real images.
 - **Tests:** tests that load the real model run only with `FUNGUS_TEST_SAM=1`.
 

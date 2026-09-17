@@ -259,6 +259,10 @@ class Analyzer:
         self.settings_hash = hashlib.sha256(blob).hexdigest()[:12]
         # Masks are kept per settings hash so runs with different methods can be compared.
         self.masks_dir = self.results_dir / "masks" / self.settings_hash
+        # Sequence segmenters (SAM 2) resume tracking from state saved with this run's masks.
+        for role, seg in (("target", self.segmenter), ("reference", self.reference_segmenter)):
+            if seg is not None and hasattr(seg, "state_dir"):
+                seg.state_dir = self.masks_dir / "sam2_state" / role
 
     # --- bookkeeping ---------------------------------------------------------------
 

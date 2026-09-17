@@ -183,3 +183,38 @@ def test_camera_page_reports_no_cameras(window, qtbot):
     camera = page(window, "Camera")
     qtbot.waitUntil(lambda: "No cameras found" in camera.message.text(), timeout=30000)
     assert camera.device.count() == 0
+
+
+def test_analyze_page_views_and_excludes_frames(window, qtbot, experiment):
+    from fungus_cv.analyze import exclusions
+    from fungus_cv.analyze.pipeline import analyze
+
+    build_experiment(experiment, minutes=range(0, 4), bump_at=-1)
+    analyze(Experiment(experiment.root))
+    window.open_experiment(experiment.root)
+    analyze_page = page(window, "Analyze")
+    analyze_page.load_results()
+    assert analyze_page.table.rowCount() == 4
+
+    analyze_page.table.selectRow(2)
+    assert analyze_page.overlay._has_image and analyze_page.exclude_btn.isEnabled()
+    analyze_page.view_mode.setCurrentText("Aligned frame + mask")
+    qtbot.waitUntil(lambda: analyze_page._analyzer is not None, timeout=20000)
+    assert analyze_page.overlay._mask_item.pixmap().width() == syn.W
+
+    analyze_page.exclude_selected("finger on the lens")
+    marked = exclusions.load(Experiment(experiment.root))
+    assert [e.reason for e in marked] == ["finger on the lens"]
+    reason_col = [c[0] for c in analyze_page_columns()].index("excluded")
+    assert analyze_page.table.item(2, reason_col).text() == "finger on the lens"
+    assert analyze_page.table.item(2, 0).font().strikeOut()
+    assert analyze_page.include_btn.isEnabled()
+    analyze_page.include_selected()
+    assert exclusions.load(Experiment(experiment.root)) == []
+    assert not analyze_page.table.item(2, 0).font().strikeOut()
+
+
+def analyze_page_columns():
+    from fungus_cv.gui.pages.analyze import COLUMNS
+
+    return COLUMNS

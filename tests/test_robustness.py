@@ -1,5 +1,6 @@
 """M4: a tilted camera, lighting changes and jumps must not create fake growth."""
 
+import csv
 from datetime import timedelta
 
 import cv2
@@ -186,8 +187,9 @@ def test_report_marks_jumps_and_writes_frame_flags(experiment):
     assert kept.jumps == 1 and kept.n_used == 12
     dropped = make_report(exp, t0=T0, exclude_jumps=True)
     assert dropped.n_used == 11
-    flags = (exp.root / "results" / "report" / "frame_flags.csv").read_text().splitlines()
-    assert len(flags) == 13 and sum(line.split(",")[-3] == "1" for line in flags[1:]) == 1
+    with open(exp.root / "results" / "report" / "frame_flags.csv", newline="") as f:
+        flags = list(csv.DictReader(f))
+    assert len(flags) == 12 and sum(row["jump"] == "1" for row in flags) == 1
 
 
 def test_annotations_patch_roundtrip(tmp_path):

@@ -627,6 +627,39 @@ def _pick_frame_index(frames: list[dict], frame: str) -> int:
 
 
 @app.command()
+def exclude(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    frame: str | None = typer.Argument(None, help="Frame file name (with or without extension)."),
+    reason: str = typer.Option("", help="Why, e.g. 'hand in front of the camera'."),
+    plot: str = typer.Option("", help="Only for this plot (default: all plots)."),
+    remove: bool = typer.Option(False, "--remove", help="Include the frame again."),
+) -> None:
+    """Leave a frame out of fits by hand, with a reason. Without FRAME, list exclusions."""
+    from fungus_cv.analyze import exclusions
+
+    exp = _load_experiment(experiment)
+    try:
+        if frame is None:
+            items = exclusions.load(exp)
+            if not items:
+                typer.echo("No frames excluded by hand.")
+            for e in items:
+                where = f" [{e.plot}]" if e.plot else ""
+                typer.echo(f"{Path(e.frame_file).name}{where}: {e.reason}  ({e.created_utc})")
+            return
+        if remove:
+            n = exclusions.include(exp, frame, plot or None)
+            typer.echo(f"Removed {n} exclusion(s) for {frame}.")
+            return
+        item = exclusions.exclude(exp, frame, reason, plot)
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Excluded {Path(item.frame_file).name}" + (f" [{plot}]" if plot else "")
+               + f": {item.reason}. Reports and studies leave it out of fits.")
+
+
+@app.command()
 def prompt(
     experiment: Path = typer.Argument(..., help="Experiment folder."),
     frame: str = typer.Option(

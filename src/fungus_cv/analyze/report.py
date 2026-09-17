@@ -189,6 +189,7 @@ class Series:
     excluded: np.ndarray
     jump: np.ndarray
     retreat: np.ndarray
+    manual: list[str] = field(default_factory=list)  # reason a person excluded a frame, or ""
 
     @property
     def use(self) -> np.ndarray:
@@ -244,13 +245,20 @@ def load_series(
     unc = np.array([_float(r.get(unc_column, "")) for r in rows]) if unc_column in rows[0] \
         else np.full(len(rows), math.nan)
 
+    from fungus_cv.analyze import exclusions
+
     flags = [set(filter(None, r["flags"].split(";"))) for r in rows]
+    # Frames a person excluded are always left out, whatever the flag settings.
+    marked = exclusions.load(experiment)
+    manual = [exclusions.reason_for(marked, r["frame_file"], plot) for r in rows]
     excluded = np.array([bool(f & set(exclude_flags)) for f in flags]) | np.isnan(y) | (t < 0)
+    excluded |= np.array([bool(m) for m in manual])
     jump = detect_jumps(t, np.where(excluded, np.nan, y), unc) & ~excluded
     if exclude_jumps:
         excluded = excluded | jump
     retreat = count_retreats(np.where(excluded, np.nan, y), unc) & ~excluded
-    return Series(metric, plot, rows, time_unit, t0_ts, t, y, unc, excluded, jump, retreat)
+    return Series(metric, plot, rows, time_unit, t0_ts, t, y, unc, excluded, jump, retreat,
+                  manual)
 
 
 def make_report(
@@ -299,11 +307,12 @@ def make_report(
     with open(flags_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["timestamp_utc", "frame_file", f"t_{time_unit}", metric,
-                         "pipeline_flags", "jump", "retreat", "used_in_fits"])
+                         "pipeline_flags", "jump", "retreat", "excluded_by_hand",
+                         "used_in_fits"])
         for i, r in enumerate(rows):
             writer.writerow([r["timestamp_utc"], r["frame_file"], round(float(t[i]), 6),
                              r[metric], r["flags"], int(jump[i]), int(retreat[i]),
-                             int(use[i])])
+                             series.manual[i], int(use[i])])
     result.files.append(flags_csv)
 
     # --- main plot: metric over time with fits ---------------------------------------
@@ -383,6 +392,8 @@ def make_report(
         "n_used": result.n_used, "n_excluded": result.n_excluded,
         "excluded_flags": list(exclude_flags), "retreats": result.retreats,
         "jumps": result.jumps, "jumps_excluded": exclude_jumps,
+        "excluded_by_hand": [{"frame_file": r["frame_file"], "reason": m}
+                             for r, m in zip(rows, series.manual) if m],
         "weighted_by_uncertainty": sigma is not None,
         "model_selection": "AICc; akaike_weight = relative likelihood among the fitted models",
         "fits": [f.to_dict() for f in fits],

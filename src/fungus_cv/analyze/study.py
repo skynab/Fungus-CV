@@ -451,7 +451,7 @@ def write_study(result: StudyResult) -> None:
         writer = csv.writer(f)
         writer.writerow(["condition", "replicate", "timestamp_utc", "frame_file",
                          f"t_{result.time_unit}", result.metric, f"{result.metric}_unc",
-                         "used_in_fit"])
+                         "excluded_by_hand", "used_in_fit"])
         for rep in result.replicates:
             if rep.series is None:
                 continue
@@ -459,7 +459,7 @@ def write_study(result: StudyResult) -> None:
             for i, row in enumerate(s.rows):
                 writer.writerow([rep.condition, rep.replicate, row["timestamp_utc"],
                                  row["frame_file"], _num(float(rep.t[i])), _num(float(s.y[i])),
-                                 _num(float(s.unc[i])), int(s.use[i])])
+                                 _num(float(s.unc[i])), s.manual[i], int(s.use[i])])
     result.files.append(data_csv)
 
     summary = {
@@ -521,7 +521,8 @@ def methods_text(result: StudyResult) -> str:
         + (" with weights from the per-frame uncertainties" if weighted else "")
         + f". Frames flagged {', '.join(study.exclude_flags) or '(none)'} were excluded"
         + ("; so were frames departing from the local trend (jumps)" if study.exclude_jumps
-           else "") + ".",
+           else "") + "."
+        + _manual_text(loaded),
     ]
     fitted = [r.fit for r in loaded if r.fit]
     n_ar1 = sum(f.error_model == "ar1" for f in fitted)
@@ -567,6 +568,18 @@ def methods_text(result: StudyResult) -> str:
         lines += ["", "Warnings to resolve before publishing:", ""]
         lines += [f"- {w}" for w in result.warnings]
     return "\n".join(lines) + "\n"
+
+
+def _manual_text(replicates: list[Replicate]) -> str:
+    reasons = [m for r in replicates for m in r.series.manual if m]
+    if not reasons:
+        return ""
+    counts: dict[str, int] = {}
+    for m in reasons:
+        counts[m] = counts.get(m, 0) + 1
+    listed = "; ".join(f"{reason} ({n})" for reason, n in counts.items())
+    return (f" {len(reasons)} frame(s) were excluded by hand after inspection: {listed} "
+            "(exclusions.json in each experiment).")
 
 
 def _describe_uncertainty(u: dict) -> str:

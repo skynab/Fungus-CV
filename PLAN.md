@@ -4,6 +4,18 @@ Time-lapse capture plus computer-vision measurement of how far a "spreading" reg
 
 ---
 
+## Status (2026-09-17)
+
+**Every milestone below is written and tested, but nothing has been run on real experiment photos or in the field yet.** The accuracy figures quoted come from synthetic scenes with known answers (the real SAM 2 and U-Net models were run, on those synthetic scenes), and the statistics from simulation.
+
+- **Works end to end** on synthetic data: capture → measure → uncertainty → fits → report, from the command line and from the desktop app.
+- **Ready and waiting for real data:** `fungus validate-suite` re-runs every accuracy check against hand-labeled frames (Bland–Altman agreement, mask IoU, model metrics) and compares them with a saved baseline. It needs your dye and moss frames.
+- **The three things that still need you:** a real dye run (does the √t law come out?), ~20 hand-measured moss frames, and an 8-hour unattended capture on each OS. `fungus health --watch` is there to watch that last one.
+
+See the README for how to use any of it.
+
+---
+
 ## 1. Goals
 
 | Stage | Scene | Spreading region | Reference object | Main metric |
@@ -46,7 +58,8 @@ Other requirements:
 | CLI | `typer` | `fungus capture`, `fungus annotate`, `fungus analyze`, `fungus report` |
 | Config | YAML (`pydantic` validated) | One config file per experiment |
 | Plots and fits | `pandas`, `matplotlib`, `scipy` | Curve fitting of growth rate |
-| Optional UI later | Streamlit or napari | Browse frames, fix masks, view charts |
+| Desktop app | **PySide6 (Qt)** | Done: a page per step, packaged as `Fungus-CV.app` / `.exe`. Chosen over Streamlit so the camera, the click tools and long analyses run locally without a browser |
+| Statistics | `scipy.stats` | Fit uncertainty (AR(1) errors, bootstrap), Welch tests with Holm correction, random-effects means |
 
 ---
 
@@ -63,28 +76,40 @@ Other requirements:
 
 Each stage reads the previous stage's output from disk. You can re-run analysis with a new model or settings without capturing again.
 
-### Experiment folder layout
+### Experiment folder layout (as built)
 ```
 experiments/2026-09-20_dye_test/
-  config.yaml            # camera, interval, prompts, color ranges, marker size…
-  frames/                # 2026-09-20T14-05-00Z_cam0.jpg  (UTC, sortable)
-  frames.csv             # timestamp, camera, exposure, focus, file hash, flags
-  prompts.json           # clicks/boxes for target + reference on frame 0
-  masks/target/…png  masks/reference/…png
-  results/measurements.csv
-  results/plots/*.png  results/overlay_timelapse.mp4
+  config.yaml            # cameras, interval, segmentation, measurement, uncertainty…
+  frames/                # 2026-09-20T14-05-00.123Z_cam0.png  (UTC, sortable)
+  frames.csv             # timestamp, camera, hash, size, brightness, sharpness, settings
+  capture.log  status.json        # log and heartbeat (for `fungus health`)
+  annotations.json       # base, path, region or field plots, neutral patch
+  exclusions.json        # frames left out by hand, with reasons
+  prompts.json           # SAM clicks (annotations_<cam>.json / prompts_<cam>.json with
+                         # several cameras; their results go to results/cameras/<cam>/)
+  results/
+    measurements.csv  run_info.json  runs/<settings hash>.json   # what produced each row
+    masks/<hash>/…png   overlays/<hash>/…jpg   masks/<hash>/sam2_state/  # resume tracking
+    report/  validation/  compare/  sensitivity/  combined/  archive/
 ```
 
-### Code layout
+### Code layout (as built)
 ```
 fungus_cv/
-  capture/      camera.py (per-OS backends, list cameras), scheduler.py, importer.py
-  preprocess/   align.py (ArUco/ECC registration), calibrate.py (px→mm), color.py
-  segment/      base.py (Segmenter interface), sam2_video.py, threshold.py, text_prompt.py
-  measure/      axis.py, extent.py, area.py
-  analyze/      fit.py (sqrt / linear / logistic), report.py, overlay.py
-  cli.py  config.py  storage.py
-tests/          synthetic images with known answers + a small real-image fixture set
+  capture/      camera.py, scheduler.py, importer.py (+ --watch), permissions.py,
+                diagnostics.py, power.py, health.py (heartbeat, checks, alerts), service.py
+  preprocess/   align.py (ArUco/ECC), markers.py (px→mm), rectify.py, lighting.py
+  segment/      base.py (Segmenter interface), color.py, sam2.py, trained.py, prompts.py
+  measure/      geometry.py, path.py (arc length), centerline.py, color_indices.py
+  learn/        dataset.py, export.py, active.py (what to label next), train.py, infer.py
+  analyze/      pipeline.py, fit.py, report.py, study.py, suite.py, validate.py, compare.py,
+                sensitivity.py, archive.py, combine.py, exclusions.py, overlay.py
+  gui/          main_window.py + pages/ (experiment, camera, capture, setup, prompt, analyze,
+                report, labels, train, study, validation, doctor)
+  ui/           interactive.py (OpenCV click tools for the command line)
+  cli.py  config.py  storage.py  quality.py  provenance.py
+tests/          synthetic scenes with known answers (dye, curved stems, tilted fields);
+                real-image regression checks run through `fungus validate-suite`
 ```
 
 Segmenters share one interface, `segment(frames, prompts) -> masks`. That makes it easy to swap the color-threshold version, SAM 2 and a later custom model, and to compare them.
@@ -101,14 +126,16 @@ Segmenters share one interface, `segment(frames, prompts) -> masks`. That makes 
   - Reconnect automatically if the camera drops. Log any gaps. Check free disk space.
   - Take the picture from a clock-aligned schedule, so timing errors don't add up over time. Timestamps are in UTC.
   - Optional: keep the camera closed between shots (cooler, and it recovers better).
-- Long unattended runs: document how to run capture as a background service (Task Scheduler on Windows, launchd on macOS, systemd on Linux) so it survives a reboot.
-- `fungus import <folder>`: bring in phone, trail-camera or Raspberry Pi images, using EXIF time or the filename as the timestamp.
-- Note for macOS: the terminal or Python must be granted camera access in System Settings.
+- Long unattended runs: `fungus service install` writes and registers the service (Task Scheduler on Windows, launchd on macOS, systemd user unit on Linux) so capture survives a reboot, after showing what it will do.
+- Every round writes a heartbeat (`status.json`); `fungus health` says whether capture is alive, photos are arriving and usable, and disk is left, and `--watch` alerts through a webhook or any command when that changes.
+- `fungus import <folder>`: bring in phone, trail-camera or Raspberry Pi images, using EXIF time or the filename as the timestamp. `--watch` keeps importing from a synced folder, skipping photos already imported and files still being copied.
+- Note for macOS: the terminal or Python must be granted camera access in System Settings; `fungus doctor` explains the state and the fix.
+- Several cameras are captured together and measured separately (`results/cameras/<name>/`), and `fungus combine` merges their views of one object.
 
 ### 4.2 Preprocessing
 - **Registration:** line every frame up with frame 0. Use ArUco markers if present, otherwise ECC or feature matching (ORB). A camera or pot moved by a few pixels would otherwise look like growth.
 - **Scale:** a printed ArUco marker (or ruler) of known size in the scene converts pixels to mm. For a field shot at an angle, 4 markers give a **top-down (homography) view**, so areas are measured correctly.
-- **Lighting:** normalize to a gray/color card or a fixed patch of the scene. Flag frames that are too dark or blurry and skip them instead of letting them corrupt the data.
+- **Lighting:** normalize to a gray/color card or a fixed patch of the scene. Flag frames that are too dark or blurry and skip them instead of letting them corrupt the data. Frames can also be excluded by hand with a reason (`exclusions.json`), which every report and study honours and lists.
 
 ### 4.3 Segmentation
 1. **Color threshold (dye test):** blue in HSV space, cleaned up with morphology. Fast, easy to understand, and a check on SAM's results.
@@ -116,8 +143,10 @@ Segmenters share one interface, `segment(frames, prompts) -> masks`. That makes 
    - `fungus annotate`: shows frame 0 (or the first frame where the target shows up) in an OpenCV window. The user clicks positive/negative points or draws a box for the **target** (dye or moss) and the **reference** (towel, stem, plot).
    - The video predictor carries both masks through the image sequence. Add corrections on later frames if a mask drifts.
    - Long runs: process in chunks with a little overlap. Use the smallest SAM 2 model that is accurate enough, so it runs on a laptop CPU or MPS.
-3. **Text prompting (optional):** "moss", "plant stem". Useful when there are many plants or photos, so nobody has to click on each one.
-4. **Fallback if moss is too subtle:** export SAM's masks, fix them in a labeling tool (e.g. CVAT or Label Studio), and fine-tune a small segmentation model. Moss on bark or soil has low contrast, so plan for this possibility.
+   - Tracking memory is saved with the run and resumed, so a new frame costs one frame of tracking however long the time-lapse is.
+3. **Text prompting (optional):** "moss", "plant stem". Not built; clicking has been enough so far.
+4. **Trained model (built, M7/M10):** start from SAM or colour masks, correct them with a brush or SAM clicks in `fungus label`, and fine-tune a U-Net per use case. `fungus dataset suggest` picks the frames worth labeling next (where the model is unsure, or two methods disagree) instead of evenly spaced ones.
+5. **Uncertainty (M8):** every frame is also segmented with narrower and wider settings; the spread becomes part of each measurement's uncertainty, so a soft edge is reported as less certain than a sharp one.
 
 Moss and dye spread gradually, so the timeline is used as a check: flag any frame where the mask area jumps or shrinks suddenly.
 
@@ -132,31 +161,50 @@ Moss and dye spread gradually, so the timeline is used as a check: flag any fram
 - `measurements.csv`: one row per frame and object.
 - Fitted models and rates:
   - Dye wicking should follow **Lucas–Washburn, h ∝ √t**. This is a **good check that the whole pipeline works** before moving to moss.
-  - Moss or infection: linear, exponential and **logistic** (sigmoid) fits, reporting growth rate, doubling time and lag.
-- Plots: extent and coverage vs. time, with the fit and confidence band.
+  - Moss or infection: linear, power, **logistic**, Gompertz (lag and maximum rate), Richards and a √t with an estimated start time. AICc weights say which fits best.
+  - Frames of one time-lapse are not independent; AR(1) errors are fitted where the data says so, and intervals come from a bootstrap.
+- Plots: extent and coverage vs. time with the fits, a quality-check plot, and the best model with its residuals in units of the reported uncertainty. PNG for looking at, PDF/SVG for a paper.
 - An overlay time-lapse video (masks, axis and front line drawn on each frame) for checking the results by eye. This is the fastest way to spot errors.
+- Across replicates: `fungus study` fits each replicate, compares conditions with the replicate as the unit of inference, and writes a methods draft with the actual settings.
+- `fungus archive` packs settings, results and hashes into one file for a data repository; `fungus sensitivity` says how much each debatable setting would move the result.
 
 ---
 
 ## 5. Milestones
 
+✅ = done and checked. 🟡 = built and tested on synthetic data, waiting on real images, real hardware or another person to confirm it.
+
 | # | Milestone | Done when |
 |---|---|---|
 | M0 ✅ | Project skeleton: packaging, CLI, config, CI running tests on Win/macOS/Linux (GitHub Actions) | `fungus --help` works on all 3 OSes |
-| M1 🟡 | **Capture**: camera list, interval capture with locked settings, metadata, reconnect, import command | An 8-hour unattended run on Windows and macOS with no missed frames *(code done; hardware test still needed)* |
+| M1 🟡 | **Capture**: camera list, interval capture with locked settings, metadata, reconnect, import command | An 8-hour unattended run on Windows and macOS with no missed frames *(code done, plus permission handling, `fungus doctor`, a heartbeat, `fungus health` and `fungus service install`; the hardware run itself is still needed)* |
 | M2 🟡 | **Dye test, simple version**: HSV threshold + ArUco scale + extent along the towel axis + CSV and plot | Measured height matches a ruler to within ~2 mm; the √t fit looks reasonable *(code done and verified on synthetic data to <0.5 mm, recovering n = 0.50; still needs a real dye run)* |
 | M3 🟡 | **SAM 2 integration**: annotate tool, video propagation, device auto-detection, `Segmenter` interface | SAM 2 dye masks agree with the threshold masks (IoU > 0.9) *(done on synthetic data: mean IoU 0.991, min 0.913; still needs a real dye run. Built on HF `transformers`, streaming, cropped to the region)* |
 | M4 🟡 | **Robustness**: registration, lighting check, bad-frame skipping, jump detection, overlay video | Bumping the camera or turning a lamp on mid-run does not create fake growth *(done on synthetic data: multi-marker perspective rectification (tilt error 9.6 → 0.26 mm), per-channel lighting correction from a neutral patch or the background (dimmed frames −80 mm → <0.1 mm), jump and retreat detection, frame_flags.csv; needs real-scene validation)* |
 | M5 🟡 | **Moss on a plant**: stem skeleton axis, soil-line base, % of stem, logistic fit | Matches hand measurements on ~20 hand-labeled frames *(done on synthetic curved stems: centerline length within 0.5%, extent within 1.5 px; `fungus validate` gives Bland–Altman agreement with hand measurements. Needs real moss + ~20 hand-measured frames)* |
 | M6 🟡 | **Field mode**: 4-marker top-down view, coverage and edge advance, multiple plots per image | Area error < ~10% against hand-drawn outlines *(done on a synthetic tilted field: area error +0.9 to +2.7% vs true outlines, 9% without rectification; named plots, per-plot reports/validation, edge advance, GCC/RCC/ExG colour indices. Needs a real field)* |
-| M7 🟡 (core, can be started after M3) | **Trainable detectors:** a labeling workflow (start from SAM masks, correct them by hand), fine-tune a small segmentation model for each use case, keep versioned models; optional Streamlit dashboard | Beats SAM alone on held-out moss frames; a new use case can be trained from a set of labeled images *(workflow done: dataset export/add-pairs, brush label editor, U-Net training with group/time-aware validation, model cards, evaluate, `method: model`. Verified end to end on synthetic dye only; needs real labeled moss. Dashboard not started)* |
+| M7 🟡 (core) | **Trainable detectors:** labeling workflow, fine-tuned model per use case, versioned models | Beats SAM alone on held-out moss frames; a new use case can be trained from labeled images *(workflow done: dataset export/add-pairs, brush editor, U-Net with group/time-aware validation, model cards, `evaluate`, `method: model`. Verified on synthetic dye only; needs real labeled moss)* |
+
+Everything below was added after the first plan, to make the results publishable and the runs survivable.
+
+| # | Milestone | Done when |
+|---|---|---|
+| M8 🟡 | **Honest uncertainty:** segmentation uncertainty per frame (each frame re-segmented narrower and wider), combined with scale, pixel and alignment terms; `fungus validate-suite` to re-run every accuracy check against hand labels with a baseline | The reported uncertainty covers the real error on hand-measured frames *(code done; `validate` reports the share of differences within 2u and the RMS z. Needs real hand measurements)* |
+| M9 ✅ | **Statistics for a paper:** AICc and Akaike weights, AR(1) frame errors by generalized least squares, bootstrap intervals, reduced χ², Durbin–Watson, lag models (sqrt_lag, Gompertz, Richards); `fungus study` for replicates and conditions (Welch + Holm, random-effects means, methods draft) | Interval coverage checked by simulation: 0.94 / 0.90 / 0.71 at AR(1) 0 / 0.5 / 0.9, against 0.94 / 0.75 / 0.31 when frames are treated as independent |
+| M10 🟡 | **Active learning and SAM-assisted labeling:** `dataset suggest` / `rank` (model uncertainty, or disagreement between two runs), brush + SAM clicks in the label editor | Labeling the suggested frames beats evenly spaced ones on real data *(picks the right frames on synthetic data; SAM click gave IoU 0.997 from one click. Needs real moss to show the gain)* |
+| M11 ✅ | **Incremental SAM 2:** tracking memory saved with the run and resumed | A new frame costs one frame of tracking, and the masks are identical to re-tracking from the start (checked with the real model: frame 61 took 1.1 s instead of 56 s) |
+| M12 ✅ | **Desktop app covers the whole workflow:** SAM prompts, labeling, training, studies, validation, live measuring during capture, excluding frames by hand | Every command-line feature has a page; GUI tests drive each page like a user (a crash in background tasks was found and fixed this way) |
+| M13 🟡 | **Reproducibility and export:** `fungus archive` bundles (hash manifest + package versions) with `--verify`, `fungus sensitivity` (how much each debatable setting moves the result, in units of the reported uncertainty), vector figures and a residual panel | A colleague reproduces a result from the bundle alone *(bundles and checks work; not yet tried by another person on another machine)* |
+| M14 🟡 | **Long runs and the field:** several cameras measured separately and combined, capture heartbeat + `fungus health` with webhook/command alerts, `fungus service install`, `fungus import --watch` for synced photos | An unattended field run reports its own problems *(code done; the service registration and webhook alerts are untested against a real OS service and a real endpoint)* |
 
 ---
 
 ## 6. Testing strategy
-- **Synthetic tests:** draw a "stem" and a colored region of known height or area in code, check the measurements match. Fast and run in CI on every OS.
-- **Small set of real test images:** ~10 dye frames and a few moss frames with hand-drawn masks, used for regression checks of IoU and extent error.
-- **Hardware tests** (not in CI): a capture smoke test run by hand on each OS.
+- **Synthetic tests (done, ~280 of them):** dye on a towel, curved swaying stems, tilted fields and soft edges, all with known answers, run in CI on Windows, macOS and Linux. Desktop-app tests drive each page like a user on an offscreen display.
+- **Real-model tests** (opt in with `FUNGUS_TEST_SAM=1`): SAM 2 against the colour threshold, and resumed tracking being identical to a full re-track.
+- **Simulation** for the statistics: interval coverage measured over hundreds of simulated time-lapses rather than assumed.
+- **Small set of real test images (still needed):** ~10 dye frames and a few moss frames with hand-drawn masks, plus ~20 hand measurements. `fungus validate-suite` runs them all and compares with a saved baseline, so a change to the code cannot quietly shift results. This is the main gap.
+- **Hardware tests** (not in CI): a capture smoke test by hand on each OS, and an 8-hour unattended run watched by `fungus health`.
 
 ---
 
@@ -167,14 +215,21 @@ Moss and dye spread gradually, so the timeline is used as a check: flag any fram
 | Auto exposure or white balance makes masks flicker | Lock camera settings, use a gray card, check brightness, smooth over time |
 | Camera or subject moves over days or weeks | Rigid mount, ArUco markers, registration step |
 | Day/night and changing sunlight (field) | Capture at fixed times of day, a light source you control, skip bad frames |
-| Moss looks too much like bark or soil for SAM without a trained model | Plan for M7: fine-tune with SAM masks corrected by hand |
-| SAM 2 is slow on CPU over thousands of frames | Smallest model that works, process in chunks, lower resolution for tracking and full resolution only for measurement |
+| Moss looks too much like bark or soil for SAM without a trained model | Built (M7/M10): correct SAM masks with a brush or SAM clicks, fine-tune a U-Net, and let `dataset suggest` pick the frames worth labeling |
+| SAM 2 is slow on CPU over thousands of frames | Solved for repeat runs: tracking resumes from saved memory, so each new frame costs one frame. The first pass is still slow on a CPU; use the smallest model that works |
+| Settings chosen by hand (thresholds, alignment, lighting) quietly decide the result | `fungus sensitivity` re-runs with each one changed and reports the effect in units of the reported uncertainty |
+| A long run dies unnoticed (camera unplugged, disk full, computer asleep) | Heartbeat + `fungus health --watch` with alerts; capture registered as a service that restarts |
 | Webcams are low resolution, which limits mm accuracy | Choose the camera by mm/pixel needed; support importing images from better cameras |
 | Webcam driver differences between OSes | Per-OS backends, `fungus cameras` to diagnose, import mode as a fallback |
 
-**Questions to decide early:**
-1. Expected image rate and duration (minutes for dye vs. hours or days for moss). This decides the default interval and storage needs.
-2. Field capture hardware: webcam + laptop, Raspberry Pi, or trail camera or phone photos?
-3. What does "infection" mean on the plant? Height reached, % of stem covered, or both?
-4. Is a GPU available, or must everything run on a laptop CPU or Apple Silicon?
-5. How precise must the results be (mm-level vs. rough trends)? This decides whether markers and calibration are required.
+**Questions asked at the start, and where they stand:**
+1. ~~Image rate and duration~~ — seconds to minutes for dye, hours for real runs. Both work; capture is clock-aligned and analysis is incremental.
+2. **Field capture hardware — still open.** Any of webcam + laptop, Raspberry Pi, trail camera or phone works: the Pi path and `import --watch` are built and documented, but nothing has been tried outdoors.
+3. ~~What "infection" means on the plant~~ — both height reached and % of stem covered are measured (`extent_mm`, `covered_length_pct`, `reference_covered_pct`).
+4. ~~GPU~~ — a modest GPU is available; CUDA, Apple GPU and CPU are picked automatically.
+5. ~~How precise~~ — paper-level, so markers and calibration are required and every result carries an uncertainty and a record of how it was produced.
+
+**Open now:**
+- How many replicates per condition? That decides whether the two-stage tests in `fungus study` have any power (with 2–3 they barely do).
+- Which metric is the headline for each use case, so the validation suite can hold it to a bound.
+- Whether to keep the raw photos in the reproducibility bundle or deposit them separately (only their hashes are in the bundle by default).

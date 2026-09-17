@@ -111,6 +111,7 @@ class PromptPage(QWidget):
 
         state.experiment_changed.connect(lambda _: self._invalidate())
         state.config_changed.connect(self._invalidate)
+        state.camera_changed.connect(lambda _: self._invalidate())
 
     def _which_changed(self, which: str) -> None:
         self.use_btn.setText(f"Use SAM 2 for the {which}")
@@ -136,6 +137,7 @@ class PromptPage(QWidget):
             return
         self._loaded_for = exp.root
         self.loading = True
+        camera = self.state.camera
         keep = self._position[1] if self._position and self._position[0] == exp.root else None
         model = exp.config.analysis.target.sam2.model
         if self.model.findText(model) < 0:
@@ -146,7 +148,8 @@ class PromptPage(QWidget):
         def work(progress, should_stop):
             from fungus_cv.analyze.pipeline import Analyzer
 
-            analyzer = Analyzer(exp, with_segmenter=False, require_annotations=False)
+            analyzer = Analyzer(exp, with_segmenter=False, require_annotations=False,
+                                camera=camera)
             n = len(analyzer.frames)
             index = keep if keep is not None and keep < n else n - 1  # stay where the user was
             return analyzer, index, analyzer.aligned_frame(index)
@@ -173,7 +176,10 @@ class PromptPage(QWidget):
         return getattr(analysis, self.which.currentText()).sam2
 
     def _prompts_path(self):
-        return self.state.experiment.root / self._config_block().prompts_file
+        from fungus_cv.analyze.pipeline import prompts_path
+
+        return prompts_path(self.state.experiment, self._config_block().prompts_file,
+                            self.state.camera)
 
     def _load_prompts(self) -> None:
         from fungus_cv.segment.prompts import Prompts

@@ -11,7 +11,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from fungus_cv.analyze.pipeline import RESULTS_DIR, annotations_path
+from fungus_cv.analyze.pipeline import annotations_path, results_dir_for
 from fungus_cv.measure.geometry import Annotations, measure_extent
 from fungus_cv.storage import Experiment
 
@@ -26,9 +26,9 @@ class RunInfo:
     mm_per_px: float | None
 
 
-def list_runs(experiment: Experiment) -> list[RunInfo]:
+def list_runs(experiment: Experiment, camera: str | None = None) -> list[RunInfo]:
     """Analysis runs that still have masks on disk, oldest first."""
-    results = experiment.root / RESULTS_DIR
+    results = results_dir_for(experiment, camera)
     runs = []
     for masks_dir in sorted((results / "masks").glob("*/")):
         info_path = results / "runs" / f"{masks_dir.name}.json"
@@ -45,14 +45,14 @@ def list_runs(experiment: Experiment) -> list[RunInfo]:
     return sorted(runs, key=lambda r: r.updated_utc)
 
 
-def resolve_run(experiment: Experiment, run: str) -> RunInfo:
+def resolve_run(experiment: Experiment, run: str, camera: str | None = None) -> RunInfo:
     """A run id, a unique prefix of one, or a folder of mask PNGs (e.g. hand labels)."""
     path = Path(run)
     if path.is_dir():
         return RunInfo(run_id=path.name, method="folder", updated_utc="",
                        n_masks=sum(1 for _ in path.glob("*.png")), masks_dir=path,
                        mm_per_px=None)
-    matches = [r for r in list_runs(experiment) if r.run_id.startswith(run)]
+    matches = [r for r in list_runs(experiment, camera) if r.run_id.startswith(run)]
     if len(matches) != 1:
         raise ValueError(f"run {run!r} matches {len(matches)} runs; see `fungus runs`")
     return matches[0]
@@ -78,9 +78,11 @@ class ComparisonSummary:
     csv_path: Path
 
 
-def compare_runs(experiment: Experiment, run_a: str, run_b: str) -> ComparisonSummary:
-    a, b = resolve_run(experiment, run_a), resolve_run(experiment, run_b)
-    ann = Annotations.load(annotations_path(experiment))
+def compare_runs(experiment: Experiment, run_a: str, run_b: str,
+                 camera: str | None = None) -> ComparisonSummary:
+    a = resolve_run(experiment, run_a, camera)
+    b = resolve_run(experiment, run_b, camera)
+    ann = Annotations.load(annotations_path(experiment, camera))
     roi = None
     mm_per_px = a.mm_per_px or b.mm_per_px
     unit = "mm" if mm_per_px else "px"
@@ -91,7 +93,7 @@ def compare_runs(experiment: Experiment, run_a: str, run_b: str) -> ComparisonSu
     if not stems:
         raise ValueError(f"runs {a.run_id} and {b.run_id} have no frames in common")
 
-    out_dir = experiment.root / RESULTS_DIR / "compare"
+    out_dir = results_dir_for(experiment, camera) / "compare"
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / f"{a.run_id}_vs_{b.run_id}.csv"
     rows = []

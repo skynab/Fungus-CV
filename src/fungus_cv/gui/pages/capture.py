@@ -287,14 +287,14 @@ class CapturePage(QWidget):
             return
         methods = {exp.config.analysis.target.method, exp.config.analysis.reference.method}
         preload_model_modules(methods)
-        root = exp.root
+        root, camera = exp.root, self.state.camera
         self.watch_status.setText("Measuring new frames…")
 
         def work(progress, should_stop):
             from fungus_cv.analyze.pipeline import Analyzer
             from fungus_cv.storage import Experiment
 
-            return Analyzer(Experiment(root)).run()
+            return Analyzer(Experiment(root), camera=camera).run()
 
         self.watch_task = run_task(work, self._watch_done, self._watch_failed)
 
@@ -327,11 +327,13 @@ class CapturePage(QWidget):
         exp = self.state.experiment
         chosen = self.watch_metric.currentText().strip()
         metric = None if chosen in ("", "(automatic)") else chosen
-        if exp is None or not (exp.root / "results" / "measurements.csv").exists():
+        if exp is None or not (self.state.results_dir() / "measurements.csv").exists():
             return
+        results_dir = self.state.results_dir()
         try:
-            plots = list_plots(exp)
-            series = [load_series(exp, metric, plot) for plot in plots]
+            plots = list_plots(exp, results_dir)
+            series = [load_series(exp, metric, plot, results_dir=results_dir)
+                      for plot in plots]
         except (FileNotFoundError, ValueError) as exc:
             self.watch_status.setText(f"<span style='color:#b00020'>{exc}</span>")
             return

@@ -602,3 +602,38 @@ def test_file_menu_archives_the_experiment(window, qtbot, experiment, tmp_path):
                     timeout=60000)
     assert archive.verify(out).ok
     assert "0 photo(s)" in window.statusBar().currentMessage()
+
+
+def test_camera_selector_switches_annotations_and_results(window, qtbot, experiment):
+    from fungus_cv.analyze.pipeline import analyze_all_cameras
+
+    from .test_multi_camera import build_two_cameras
+
+    exp = build_two_cameras(experiment)
+    analyze_all_cameras(exp)
+    window.open_experiment(exp.root)
+    assert window.camera_box.isVisible() and window.camera_box.count() == 2
+    assert window.state.camera == "cam0"
+
+    analyze_page = page(window, "Analyze")
+    analyze_page.load_results()
+    assert analyze_page.table.rowCount() == 4
+    first = float(analyze_page.rows[-1]["extent_mm"])
+
+    window.camera_box.setCurrentText("cam1")
+    assert window.state.camera == "cam1"
+    analyze_page.load_results()
+    second = float(analyze_page.rows[-1]["extent_mm"])
+    assert second < first * 0.9  # cam1 sees the towel foreshortened
+
+    setup = page(window, "Set up measurement")
+    qtbot.waitUntil(lambda: setup.analyzer is not None, timeout=20000)
+    assert setup.analyzer.camera == "cam1"
+    setup.save_annotations()
+    assert (exp.root / "annotations_cam1.json").exists()
+
+    report = page(window, "Report")
+    report.refresh()
+    report.make()
+    qtbot.waitUntil(lambda: report.result is not None, timeout=60000)
+    assert report.result.files[0].parent.parent.name == "cam1"

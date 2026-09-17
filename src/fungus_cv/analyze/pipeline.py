@@ -86,8 +86,8 @@ def _fmt(value, digits: int = 4):
     return value
 
 
-def choose_camera(experiment: Experiment, rows: list[dict]) -> str:
-    wanted = experiment.config.analysis.camera
+def choose_camera(experiment: Experiment, rows: list[dict], camera: str | None = None) -> str:
+    wanted = camera or experiment.config.analysis.camera
     if wanted:
         return wanted
     counts = Counter(r["camera"] for r in rows if r["status"] == "ok")
@@ -96,17 +96,49 @@ def choose_camera(experiment: Experiment, rows: list[dict]) -> str:
     return counts.most_common(1)[0][0]
 
 
-def frames_for_analysis(experiment: Experiment) -> list[dict]:
+def cameras_with_frames(experiment: Experiment) -> list[str]:
+    """Cameras that actually took photos, in the order they appear in the config."""
+    have = {r["camera"] for r in experiment.read_frames() if r["status"] == "ok"}
+    configured = [c.name for c in experiment.config.cameras if c.name in have]
+    return configured + sorted(have - set(configured))
+
+
+def multi_camera(experiment: Experiment) -> bool:
+    return len(experiment.config.cameras) > 1
+
+
+def results_dir_for(experiment: Experiment, camera: str | None = None) -> Path:
+    """Where one camera's results live: ``results/`` for a single camera, and
+    ``results/cameras/<name>/`` when the experiment has several, so they never mix."""
+    base = experiment.root / RESULTS_DIR
+    if camera is None or not multi_camera(experiment):
+        return base
+    return base / "cameras" / camera
+
+
+def frames_for_analysis(experiment: Experiment, camera: str | None = None) -> list[dict]:
     rows = experiment.read_frames()
-    camera = choose_camera(experiment, rows)
+    camera = choose_camera(experiment, rows, camera)
     frames = [r for r in rows if r["status"] == "ok" and r["camera"] == camera]
     if not frames:
         raise AnalysisError(f"no frames for camera {camera!r}")
     return sorted(frames, key=lambda r: r["timestamp_utc"])
 
 
-def annotations_path(experiment: Experiment) -> Path:
+def annotations_path(experiment: Experiment, camera: str | None = None) -> Path:
+    """``annotations.json``, or ``annotations_<camera>.json`` when the experiment has several
+    cameras: each one sees a different scene, so each needs its own base, path and region."""
+    if camera and multi_camera(experiment):
+        return experiment.root / f"annotations_{camera}.json"
     return experiment.root / ANNOTATIONS_NAME
+
+
+def prompts_path(experiment: Experiment, prompts_file: str, camera: str | None = None) -> Path:
+    """The SAM prompts file for one camera (``prompts_<camera>.json`` with several)."""
+    path = Path(prompts_file)
+    if camera and multi_camera(experiment):
+        return experiment.root / f"{path.stem}_{camera}{path.suffix or '.json'}"
+    return experiment.root / prompts_file
 
 
 def read_image(experiment: Experiment, rel: str) -> np.ndarray:
@@ -124,16 +156,19 @@ class Analyzer:
     """
 
     def __init__(self, experiment: Experiment, with_segmenter: bool = True,
-                 require_annotations: bool = True, results_dir: Path | None = None):
+                 require_annotations: bool = True, results_dir: Path | None = None,
+                 camera: str | None = None):
         self.experiment = experiment
         self.cfg = experiment.config.analysis
+        self.camera = choose_camera(experiment, experiment.read_frames(), camera)
         # A different results folder keeps trial runs (e.g. `fungus sensitivity`) apart from
         # the experiment's own results. It must stay inside the experiment, because mask and
         # overlay paths are recorded relative to it.
-        self.results_dir = Path(results_dir) if results_dir else experiment.root / RESULTS_DIR
+        self.results_dir = (Path(results_dir) if results_dir
+                            else results_dir_for(experiment, self.camera))
         self.measurements_path = self.results_dir / MEASUREMENTS_NAME
 
-        frames = frames_for_analysis(experiment)
+        frames = frames_for_analysis(experiment, self.camera)
         self.frames = frames
         self.reference_row = frames[0]
         self.raw_reference = read_image(experiment, self.reference_row["file"])
@@ -158,7 +193,7 @@ class Analyzer:
         self.reference = self._rectify(self.raw_reference)
         h, w = self.reference.shape[:2]
 
-        ann_path = annotations_path(experiment)
+        ann_path = annotations_path(experiment, self.camera)
         self.annotations: Annotations | None = None
         if ann_path.exists():
             self.annotations = Annotations.load(ann_path)
@@ -238,14 +273,17 @@ class Analyzer:
                              for p in self.plots if p.has_axis}
         try:
             self.segmenter = build_segmenter(self.cfg.target, experiment.root,
-                                             self.annotations.roi, self.cfg.uncertainty)
+                                             self.annotations.roi, self.cfg.uncertainty,
+                                             prompts_file=self._prompts_file("target"))
             self.reference_segmenter = None
             if self.cfg.reference.method != "none":
-                self.reference_segmenter = build_segmenter(self.cfg.reference, experiment.root,
-                                                           self.annotations.roi)
+                self.reference_segmenter = build_segmenter(
+                    self.cfg.reference, experiment.root, self.annotations.roi,
+                    prompts_file=self._prompts_file("reference"))
         except (ValueError, RuntimeError, OSError) as exc:  # missing prompts, model, torch
             raise AnalysisError(str(exc)) from exc
         analysis_settings = self.cfg.model_dump(mode="json")
+        analysis_settings["camera"] = self.camera
         analysis_settings["target"] = self.cfg.target.selected()
         analysis_settings["reference"] = self.cfg.reference.selected()
         self.settings = {
@@ -266,6 +304,11 @@ class Analyzer:
         for role, seg in (("target", self.segmenter), ("reference", self.reference_segmenter)):
             if seg is not None and hasattr(seg, "state_dir"):
                 seg.state_dir = self.masks_dir / "sam2_state" / role
+
+    def _prompts_file(self, role: str) -> Path:
+        """SAM prompts for this camera (each camera is prompted separately)."""
+        return prompts_path(self.experiment, getattr(self.cfg, role).sam2.prompts_file,
+                            self.camera)
 
     # --- bookkeeping ---------------------------------------------------------------
 
@@ -667,16 +710,33 @@ def _area_only(mask: np.ndarray, region: np.ndarray,
                              reference_px=ref_px, reference_covered_fraction=ref_frac)
 
 
-def analyze(experiment: Experiment, force: bool = False) -> AnalysisSummary:
-    return Analyzer(experiment).run(force=force)
+def analyze(experiment: Experiment, force: bool = False,
+            camera: str | None = None) -> AnalysisSummary:
+    return Analyzer(experiment, camera=camera).run(force=force)
 
 
-def watch(experiment_root: Path, poll_seconds: float = 30.0, on_summary=None) -> None:
+def analyze_all_cameras(experiment: Experiment, force: bool = False,
+                        progress=None) -> dict[str, AnalysisSummary | str]:
+    """Measure every camera that has frames; a camera that fails is reported, not raised."""
+    out: dict[str, AnalysisSummary | str] = {}
+    for camera in cameras_with_frames(experiment):
+        if progress:
+            progress(camera)
+        try:
+            out[camera] = analyze(experiment, force=force, camera=camera)
+        except AnalysisError as exc:
+            log.error("camera %s: %s", camera, exc)
+            out[camera] = str(exc)
+    return out
+
+
+def watch(experiment_root: Path, poll_seconds: float = 30.0, on_summary=None,
+          camera: str | None = None) -> None:
     """Analyze new frames as they arrive (e.g. alongside `fungus capture`)."""
     while True:
         experiment = Experiment(experiment_root)  # re-read config each pass
         try:
-            summary = analyze(experiment)
+            summary = analyze(experiment, camera=camera)
             if on_summary and summary.processed:
                 on_summary(summary)
         except AnalysisError as exc:

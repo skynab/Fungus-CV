@@ -161,7 +161,8 @@ class ValidationPage(QWidget):
         try:
             if path.exists():
                 raise ValueError(f"{path} already exists")
-            n = write_template(exp, path, self.template_count.value())
+            n = write_template(exp, path, self.template_count.value(),
+                               self.state.results_dir())
         except (OSError, ValueError) as exc:
             self._error(str(exc))
             return
@@ -177,12 +178,13 @@ class ValidationPage(QWidget):
             return
         hand, metric = Path(self.hand_csv.text()), self.metric.currentText()
         plot = self.plot.text().strip() or None
+        results_dir = self.state.results_dir()
         self.validate_btn.setEnabled(False)
 
         def work(progress, should_stop):
             from fungus_cv.analyze.validate import validate
 
-            return validate(exp, hand, metric, plot)
+            return validate(exp, hand, metric, plot, results_dir)
 
         run_task(work, self._validated, self._validate_failed)
 

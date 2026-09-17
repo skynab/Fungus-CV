@@ -288,14 +288,16 @@ def make_report(
     bootstrap: int = 1000,
     errors: str = "auto",
     seed: int = 0,
+    results_dir: Path | None = None,
 ) -> ReportResult:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    plots = list_plots(experiment)
-    series = load_series(experiment, metric, plot, t0, time_unit, exclude_flags, exclude_jumps)
+    plots = list_plots(experiment, results_dir)
+    series = load_series(experiment, metric, plot, t0, time_unit, exclude_flags, exclude_jumps,
+                         results_dir)
     metric, plot, rows, time_unit = series.metric, series.plot, series.rows, series.time_unit
     t, y, unc = series.t, series.y, series.unc
     excluded, jump, retreat, use = series.excluded, series.jump, series.retreat, series.use
@@ -304,7 +306,7 @@ def make_report(
     fits = fit_all(t[use], y[use], models=models, sigma=sigma, bootstrap=bootstrap,
                    errors=errors, seed=seed)
 
-    out_dir = experiment.root / RESULTS_DIR / "report"
+    out_dir = (Path(results_dir) if results_dir else experiment.root / RESULTS_DIR) / "report"
     if plots != ["main"]:
         out_dir = out_dir / plot
     out_dir.mkdir(parents=True, exist_ok=True)

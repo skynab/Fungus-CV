@@ -118,6 +118,7 @@ class AnalyzePage(QWidget):
         layout.addWidget(splitter, 1)
 
         state.experiment_changed.connect(lambda _: self._experiment_changed())
+        state.camera_changed.connect(lambda _: self._experiment_changed())
         state.busy_changed.connect(lambda busy: self.run_btn.setEnabled(
             not busy and self.task is None and state.experiment is not None))
 
@@ -135,6 +136,7 @@ class AnalyzePage(QWidget):
         if exp is None:
             return
         force = self.force.isChecked()
+        camera = self.state.camera
         analysis = exp.config.analysis
         methods = {analysis.target.method, analysis.reference.method}
         if methods & {"sam2", "model"}:
@@ -151,7 +153,7 @@ class AnalyzePage(QWidget):
             from fungus_cv.analyze.pipeline import Analyzer
             from fungus_cv.storage import Experiment
 
-            analyzer = Analyzer(Experiment(exp.root))
+            analyzer = Analyzer(Experiment(exp.root), camera=camera)
             return analyzer.run(force=force, progress=lambda d, t, stage: progress((d, t, stage)),
                                 should_stop=should_stop)
 
@@ -201,7 +203,7 @@ class AnalyzePage(QWidget):
         self.overlay.set_mask(None)
         self.run_btn.setEnabled(exp is not None and self.task is None)
         if exp is not None:
-            path = exp.root / "results" / "measurements.csv"
+            path = self.state.results_dir() / "measurements.csv"
             if path.exists():
                 with open(path, newline="", encoding="utf-8") as f:
                     self.rows = sorted(csv.DictReader(f), key=lambda r: r["timestamp_utc"])
@@ -277,13 +279,15 @@ class AnalyzePage(QWidget):
 
     def _show_aligned(self, row: dict, with_mask: bool) -> None:
         exp = self.state.experiment
+        camera = self.state.camera
         self.frame_info.setText(self.frame_info.text() + "<br>Aligning frame…")
         cached = self._analyzer
 
         def work(progress, should_stop):
             from fungus_cv.analyze.pipeline import Analyzer
 
-            analyzer = cached or Analyzer(exp, with_segmenter=False, require_annotations=False)
+            analyzer = cached or Analyzer(exp, with_segmenter=False,
+                                          require_annotations=False, camera=camera)
             index = next(i for i, r in enumerate(analyzer.frames)
                          if r["file"] == row["frame_file"])
             mask = None

@@ -278,6 +278,24 @@ fungus report experiments/field-1 --metric gcc_p90                  # greenness,
 
 On a synthetic tilted field with two plots and irregular growing patches, rectified areas were within **+0.9 to +2.7%** of the true outlines (the plan's target was <10%). Errors were largest for the smallest patches, where edge pixels matter most.
 
+## Several cameras
+
+List more than one camera in `config.yaml` and each is captured, annotated, measured and reported **on its own**, because each sees a different scene:
+
+```bash
+fungus annotate experiments/plant-1 --camera cam1    # annotations_cam1.json
+fungus prompt   experiments/plant-1 --camera cam1    # prompts_cam1.json
+fungus analyze  experiments/plant-1 --camera all     # results/cameras/<name>/...
+fungus report   experiments/plant-1 --camera cam1
+fungus combine  experiments/plant-1 --metric extent_mm
+```
+
+- **Per-camera files:** `annotations_<camera>.json`, `prompts_<camera>.json` and `results/cameras/<camera>/`. With a single camera nothing changes (`annotations.json`, `results/`).
+- `--camera` also works on `runs`, `compare`, `validate` and `dataset export`. In the app, a **Camera** selector appears in the status bar and every page follows it.
+- **Combining views** (`fungus combine`): a camera shortens whatever leans toward or away from it, so **every view underestimates a length**. The default `max` takes the longest view, which is closest to the truth and still a lower bound; `--method mean|median` is available for metrics that aren't lengths. Frames within `--tolerance` (60 s) count as the same moment.
+- The output CSV keeps each camera's value, which camera was largest, and the **spread** (largest minus smallest). A large spread means the object is far from perpendicular to at least one camera.
+- This is a practical fix for foreshortening, not a 3D reconstruction: it does not need calibration between the cameras, and it cannot recover a length that no view sees.
+
 ## Moss on a plant stem (curved objects)
 
 Set `analysis.measure.mode: path` to measure **along the stem** by arc length, instead of along a straight line.

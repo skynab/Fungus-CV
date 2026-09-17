@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QSize, Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -109,7 +110,15 @@ class MainWindow(QMainWindow):
         row.addWidget(self.stack, 1)
         self.setCentralWidget(central)
 
+        self.camera_label = QLabel("Camera:")
+        self.camera_box = QComboBox()
+        self.camera_box.setToolTip("With several cameras, each one is annotated, measured and "
+                                   "reported on its own.")
+        self.camera_box.currentTextChanged.connect(self._camera_chosen)
         self.experiment_label = QLabel("No experiment open")
+        for widget in (self.camera_label, self.camera_box):
+            widget.setVisible(False)
+            self.statusBar().addPermanentWidget(widget)
         self.statusBar().addPermanentWidget(self.experiment_label)
         self.state.experiment_changed.connect(self._experiment_changed)
         self._build_menu()
@@ -129,7 +138,20 @@ class MainWindow(QMainWindow):
             if self.pages[index][0] == title:
                 self.nav.setCurrentRow(row)
 
+    def _camera_chosen(self, name: str) -> None:
+        if name:
+            self.state.set_camera(name)
+
     def _experiment_changed(self, experiment) -> None:
+        cameras = [c.name for c in experiment.config.cameras] if experiment else []
+        self.camera_box.blockSignals(True)
+        self.camera_box.clear()
+        self.camera_box.addItems(cameras)
+        if self.state.camera in cameras:
+            self.camera_box.setCurrentText(self.state.camera)
+        self.camera_box.blockSignals(False)
+        for widget in (self.camera_label, self.camera_box):
+            widget.setVisible(len(cameras) > 1)
         if experiment is None:
             self.experiment_label.setText("No experiment open")
             self.setWindowTitle(APP_NAME)

@@ -423,6 +423,8 @@ def annotate(
     experiment: Path = typer.Argument(..., help="Experiment folder."),
     field: bool = typer.Option(False, "--field", help="Outline field plots instead of a "
                                "base/tip/region (plots are named plot1, plot2, ...)."),
+    camera: str | None = typer.Option(None, help="Which camera's view to annotate (each "
+                                      "camera has its own annotations)."),
 ) -> None:
     """Click the base, tip and region to measure on the reference (first) frame."""
     _require_gui()
@@ -433,7 +435,8 @@ def annotate(
     exp = _load_experiment(experiment)
     _setup_logging()
     try:  # show the reference as the pipeline prepares it (e.g. rectified)
-        analyzer = Analyzer(exp, with_segmenter=False, require_annotations=False)
+        analyzer = Analyzer(exp, with_segmenter=False, require_annotations=False,
+                            camera=camera)
     except AnalysisError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
@@ -444,7 +447,7 @@ def annotate(
     except Cancelled:
         typer.echo("Cancelled; nothing saved.")
         raise typer.Exit(1) from None
-    path = annotations_path(exp)
+    path = annotations_path(exp, analyzer.camera)
     ann.save(path)
     if ann.plots:
         typer.echo(f"Saved {path} with plots {[p.name for p in ann.plots]}"
@@ -508,6 +511,8 @@ def analyze(
     force: bool = typer.Option(False, help="Re-measure every frame."),
     watch: bool = typer.Option(False, help="Keep running and measure new frames as they arrive."),
     poll: str = typer.Option("30s", help="How often to check for new frames with --watch."),
+    camera: str | None = typer.Option(None, help="Which camera to measure, or 'all'. With "
+                                      "several cameras each one gets results/cameras/<name>/."),
 ) -> None:
     """Align, segment and measure every frame; results go to results/measurements.csv."""
     from fungus_cv.analyze.pipeline import AnalysisError
@@ -525,14 +530,35 @@ def analyze(
         )
 
     if watch:
+        if camera == "all":
+            typer.secho("--watch measures one camera; give its name", fg=typer.colors.RED,
+                        err=True)
+            raise typer.Exit(1)
         typer.echo("Watching for new frames; Ctrl+C to stop.")
         try:
-            run_watch(exp.root, parse_duration(poll), on_summary=show)
+            run_watch(exp.root, parse_duration(poll), on_summary=show, camera=camera)
         except KeyboardInterrupt:
             pass
         return
+    if camera == "all":
+        from fungus_cv.analyze.pipeline import analyze_all_cameras
+
+        results = analyze_all_cameras(
+            exp, force=force, progress=lambda name: typer.echo(f"camera {name}:"))
+        if not results:
+            typer.secho("no frames yet", fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
+        for name, outcome in results.items():
+            if isinstance(outcome, str):
+                typer.secho(f"  {name}: {outcome}", fg=typer.colors.RED)
+            else:
+                typer.echo(f"  {name}: ", nl=False)
+                show(outcome)
+        if all(isinstance(o, str) for o in results.values()):
+            raise typer.Exit(1)
+        return
     try:
-        show(run_analyze(exp, force=force))
+        show(run_analyze(exp, force=force, camera=camera))
     except AnalysisError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
@@ -553,6 +579,7 @@ def report(
     exclude_jumps: bool = typer.Option(False, help="Leave frames that jump off the local "
                                        "trend out of the fits (they are always marked)."),
     plot: list[str] = typer.Option([], help="Plot(s) to report (repeatable). Default: all."),
+    camera: str | None = typer.Option(None, help="Which camera's results to report."),
     model: list[str] = typer.Option([], help="Model(s) to fit (repeatable): linear, sqrt, "
                                     "sqrt_lag, power, logistic, gompertz, richards. Default: "
                                     "linear, sqrt, power, logistic."),
@@ -592,10 +619,13 @@ def report(
         typer.secho(f"unknown model(s) {unknown}; choose from {list(MODELS)}",
                     fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
+    from fungus_cv.analyze.pipeline import results_dir_for
+
+    results_dir = results_dir_for(exp, camera)
     try:
-        plots = list(plot) or list_plots(exp)
+        plots = list(plot) or list_plots(exp, results_dir)
         results = [make_report(
-            exp, metric=metric, t0=t0, time_unit=time_unit,
+            exp, metric=metric, t0=t0, time_unit=time_unit, results_dir=results_dir,
             exclude_flags=() if include_flagged else DEFAULT_EXCLUDE, video=video,
             exclude_jumps=exclude_jumps, plot=name, models=tuple(model) or DEFAULT_MODELS,
             formats=tuple(figure_format) or DEFAULT_FORMATS, dpi=dpi,
@@ -685,10 +715,11 @@ def prompt(
     preview: bool = typer.Option(True, help="Show the SAM mask live while clicking."),
     reference: bool = typer.Option(False, "--reference",
                                    help="Prompt the reference object (e.g. stem) instead."),
+    camera: str | None = typer.Option(None, help="Which camera's frames to prompt."),
 ) -> None:
     """Click on the target for SAM 2 (left = target, right = not target)."""
     _require_gui()
-    from fungus_cv.analyze.pipeline import AnalysisError, Analyzer
+    from fungus_cv.analyze.pipeline import AnalysisError, Analyzer, prompts_path
     from fungus_cv.segment.prompts import Prompts
     from fungus_cv.segment.sam2 import Sam2VideoSegmenter, _RoiCrop
     from fungus_cv.ui.interactive import Cancelled, prompt_target
@@ -696,7 +727,7 @@ def prompt(
     exp = _load_experiment(experiment)
     _setup_logging()
     try:
-        analyzer = Analyzer(exp, with_segmenter=False)
+        analyzer = Analyzer(exp, with_segmenter=False, camera=camera)
     except AnalysisError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
@@ -706,7 +737,7 @@ def prompt(
 
     block = exp.config.analysis.reference if reference else exp.config.analysis.target
     cfg = block.sam2
-    path = exp.root / cfg.prompts_file
+    path = prompts_path(exp, cfg.prompts_file, analyzer.camera)
     prompts = Prompts.load(path) if path.exists() else Prompts()
     preview_fn = None
     if preview:
@@ -731,12 +762,15 @@ def prompt(
 
 
 @app.command()
-def runs(experiment: Path = typer.Argument(..., help="Experiment folder.")) -> None:
+def runs(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    camera: str | None = typer.Option(None, help="Which camera's runs to list."),
+) -> None:
     """List analysis runs whose masks are on disk (for `fungus compare`)."""
     from fungus_cv.analyze.compare import list_runs
 
     exp = _load_experiment(experiment)
-    found = list_runs(exp)
+    found = list_runs(exp, camera)
     if not found:
         typer.echo("No runs yet; run `fungus analyze`.")
         return
@@ -750,13 +784,14 @@ def compare(
     run_a: str | None = typer.Argument(None, help="Run id/prefix or folder of masks. "
                                        "Default: second newest run."),
     run_b: str | None = typer.Argument(None, help="Default: newest run."),
+    camera: str | None = typer.Option(None, help="Which camera's runs to compare."),
 ) -> None:
     """Compare two runs' masks per frame: IoU and extent difference."""
     from fungus_cv.analyze.compare import compare_runs, list_runs
 
     exp = _load_experiment(experiment)
     if run_a is None or run_b is None:
-        found = list_runs(exp)
+        found = list_runs(exp, camera)
         if len(found) < 2:
             typer.secho("need two runs; analyze with two different settings first",
                         fg=typer.colors.RED, err=True)
@@ -764,7 +799,7 @@ def compare(
         run_a = run_a or found[-2].run_id
         run_b = run_b or found[-1].run_id
     try:
-        r = compare_runs(exp, run_a, run_b)
+        r = compare_runs(exp, run_a, run_b, camera)
     except (ValueError, FileNotFoundError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
@@ -785,21 +820,24 @@ def validate_cmd(
     plot: str | None = typer.Option(None, help="Only this plot (field experiments)."),
     make_template: int = typer.Option(0, help="Instead of validating, write HAND_CSV with this "
                                       "many evenly spaced frames to measure by hand."),
+    camera: str | None = typer.Option(None, help="Which camera's results to check."),
 ) -> None:
     """Compare automatic measurements with hand measurements (Bland-Altman agreement)."""
+    from fungus_cv.analyze.pipeline import results_dir_for
     from fungus_cv.analyze.validate import validate, write_template
 
     exp = _load_experiment(experiment)
+    results_dir = results_dir_for(exp, camera)
     try:
         if make_template:
             if hand_csv.exists():
                 raise ValueError(f"{hand_csv} already exists")
-            n = write_template(exp, hand_csv, make_template)
+            n = write_template(exp, hand_csv, make_template, results_dir)
             typer.echo(f"Wrote {hand_csv} with {n} frames. Measure each frame by hand (same "
                        f"units as {metric}), fill in 'value', then run this command again "
                        "without --make-template.")
             return
-        a = validate(exp, hand_csv, metric, plot)
+        a = validate(exp, hand_csv, metric, plot, results_dir)
     except (ValueError, FileNotFoundError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
@@ -882,6 +920,45 @@ def study(
     for w in result.warnings:
         typer.secho(f"warning: {w}", fg=typer.colors.YELLOW)
     typer.echo(f"wrote {result.out_dir} (methods.md has a draft methods paragraph)")
+
+
+@app.command()
+def combine(
+    experiment: Path = typer.Argument(..., help="Experiment folder with several cameras."),
+    metric: str = typer.Option("extent_mm", help="Measurement to combine."),
+    camera: list[str] = typer.Option([], help="Cameras to use (repeatable). Default: all with "
+                                     "frames."),
+    method: str = typer.Option("max", help="max (each view shortens a length, so the largest "
+                               "is closest to the truth) | mean | median."),
+    plot: str | None = typer.Option(None, help="Plot to combine (field experiments)."),
+    tolerance: str = typer.Option("60s", help="How far apart frames of different cameras may "
+                                  "be and still count as the same moment."),
+) -> None:
+    """Combine several cameras' views of the same object into one measurement per moment."""
+    from fungus_cv.analyze.combine import combine as run_combine
+
+    exp = _load_experiment(experiment)
+    _setup_logging()
+    try:
+        result = run_combine(exp, metric=metric, cameras=list(camera) or None, method=method,
+                             plot=plot, tolerance_s=parse_duration(tolerance))
+    except (ValueError, FileNotFoundError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{metric} from {', '.join(result.cameras)} using '{method}': "
+               f"{len(result.rows)} moment(s)"
+               + (f", {result.unmatched} without every view" if result.unmatched else ""))
+    if result.rows:
+        spread = result.mean_spread
+        if spread == spread:
+            typer.echo(f"  views disagree by {spread:.4g} on average (largest minus smallest); "
+                       "a big spread means the object is far from perpendicular to a camera")
+        counts = Counter(r.best_camera for r in result.rows)
+        typer.echo("  largest view came from: "
+                   + ", ".join(f"{c} {n}x" for c, n in counts.most_common()))
+    if result.note:
+        typer.secho(f"note: {result.note}", fg=typer.colors.YELLOW)
+    typer.echo(f"wrote {result.out_path}")
 
 
 @app.command()
@@ -1080,6 +1157,7 @@ def dataset_export(
     full_frame: bool = typer.Option(False, help="Export whole frames instead of the region."),
     group: str | None = typer.Option(None, help="Group name (default: experiment name). "
                                      "Validation never mixes groups with training."),
+    camera: str | None = typer.Option(None, help="Which camera's run to export from."),
 ) -> None:
     """Copy frames and their masks into a dataset, to be corrected with `fungus label`."""
     from fungus_cv.analyze.compare import list_runs
@@ -1090,7 +1168,7 @@ def dataset_export(
     exp = _load_experiment(experiment)
     _setup_logging()
     if run is None:
-        found = list_runs(exp)
+        found = list_runs(exp, camera)
         if not found:
             typer.secho("no analysis runs yet; run `fungus analyze` first", fg=typer.colors.RED,
                         err=True)
@@ -1099,7 +1177,7 @@ def dataset_export(
     ds = Dataset.open_or_create(dataset)
     try:
         added = export_from_run(exp, ds, run, count=count, crop_to_roi=not full_frame,
-                                group=group)
+                                group=group, camera=camera)
     except (AnalysisError, ValueError, FileNotFoundError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc

@@ -120,8 +120,9 @@ class ReportPage(QWidget):
         try:
             from fungus_cv.analyze.report import list_plots, load_measurements
 
-            plots = list_plots(exp)
-            rows = load_measurements(exp)
+            results_dir = self.state.results_dir()
+            plots = list_plots(exp, results_dir)
+            rows = load_measurements(exp, results_dir=results_dir)
         except FileNotFoundError:
             self.message.setText("No analysis results yet: run Analyze first.")
             return
@@ -148,6 +149,7 @@ class ReportPage(QWidget):
             exclude_jumps=self.exclude_jumps.isChecked(),
             video=self.video.isChecked(),
             formats=("png", "pdf", "svg") if self.vector.isChecked() else ("png",),
+            results_dir=self.state.results_dir(),
         )
         self.make_btn.setEnabled(False)
         self.message.setText("Fitting models and drawing charts…")

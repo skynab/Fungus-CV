@@ -57,7 +57,8 @@ def segment_with_variants(segmenter, image: np.ndarray) -> tuple[np.ndarray, lis
     return segmenter.segment(image), []
 
 
-def build_segmenter(target_config, experiment_root=None, roi=None, uncertainty=None):
+def build_segmenter(target_config, experiment_root=None, roi=None, uncertainty=None,
+                    prompts_file=None):
     """``roi`` is the annotated region polygon in reference coordinates (used for cropping).
 
     ``uncertainty`` (an ``UncertaintyConfig`` with ``segmentation`` on) makes the segmenter
@@ -74,7 +75,8 @@ def build_segmenter(target_config, experiment_root=None, roi=None, uncertainty=N
     if target_config.method == "sam2":
         from fungus_cv.segment.sam2 import Sam2VideoSegmenter
 
-        seg = Sam2VideoSegmenter.from_config(target_config.sam2, experiment_root, roi)
+        seg = Sam2VideoSegmenter.from_config(target_config.sam2, experiment_root, roi,
+                                            prompts_file)
         seg.variant_logit_delta = uncertainty.logit_delta if uncertainty else None
         return seg
     if target_config.method == "model":

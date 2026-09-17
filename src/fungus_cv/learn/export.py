@@ -49,14 +49,15 @@ def export_from_run(
     margin_px: int = 32,
     group: str | None = None,
     replace: bool = False,
+    camera: str | None = None,
 ) -> list[Item]:
     """Copy aligned frames and a run's masks into the dataset as unreviewed labels.
 
     Frames are spread evenly over the time-lapse so early (small target) and late (large
     target) stages are both represented.
     """
-    run_info = resolve_run(experiment, run)
-    analyzer = Analyzer(experiment, with_segmenter=False)
+    run_info = resolve_run(experiment, run, camera)
+    analyzer = Analyzer(experiment, with_segmenter=False, camera=camera)
     frames = analyzer.frames
     stems = {p.stem for p in run_info.masks_dir.glob("*.png")}
     candidates = [i for i, r in enumerate(frames) if Path(r["file"]).stem in stems]

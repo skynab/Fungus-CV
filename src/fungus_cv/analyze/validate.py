@@ -16,9 +16,10 @@ from fungus_cv.learn.export import pick_evenly
 from fungus_cv.storage import Experiment
 
 
-def write_template(experiment: Experiment, path: Path, count: int = 20) -> int:
+def write_template(experiment: Experiment, path: Path, count: int = 20,
+                   results_dir: Path | None = None) -> int:
     """CSV of evenly spaced analyzed frames (one row per plot) with an empty ``value``."""
-    all_rows = load_measurements(experiment)
+    all_rows = load_measurements(experiment, results_dir=results_dir)
     frames = sorted({r["frame_file"] for r in all_rows},
                     key=lambda f: next(r["timestamp_utc"] for r in all_rows
                                        if r["frame_file"] == f))
@@ -70,13 +71,13 @@ def _match(key: str, rows: list[dict]) -> dict | None:
 
 
 def validate(experiment: Experiment, hand_csv: Path, metric: str = "extent_mm",
-             plot: str | None = None) -> Agreement:
+             plot: str | None = None, results_dir: Path | None = None) -> Agreement:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    rows = load_measurements(experiment, plot)
+    rows = load_measurements(experiment, plot, results_dir)
     if rows and metric not in rows[0]:
         raise ValueError(f"unknown metric {metric!r}")
     with open(hand_csv, newline="", encoding="utf-8") as f:
@@ -126,7 +127,8 @@ def validate(experiment: Experiment, hand_csv: Path, metric: str = "extent_mm",
         within_2u = float((np.abs(diff) <= 2 * unc).mean())
         z_rms = float(np.sqrt(((diff / unc) ** 2).mean()))
 
-    out_dir = experiment.root / RESULTS_DIR / "validation"
+    out_dir = (Path(results_dir) if results_dir else experiment.root / RESULTS_DIR) / \
+        "validation"
     out_dir.mkdir(parents=True, exist_ok=True)
     result = Agreement(
         metric=metric, n=n, bias=bias, bias_ci95=(bias - half_ci, bias + half_ci),

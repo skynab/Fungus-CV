@@ -80,8 +80,10 @@ class Sam2VideoSegmenter:
     last_resume: dict = field(default_factory=dict, init=False)  # what the last run did
 
     @classmethod
-    def from_config(cls, cfg, experiment_root: Path | None, roi) -> Sam2VideoSegmenter:
-        path = Path(experiment_root or ".") / cfg.prompts_file
+    def from_config(cls, cfg, experiment_root: Path | None, roi,
+                    prompts_file: Path | None = None) -> Sam2VideoSegmenter:
+        path = Path(prompts_file) if prompts_file else Path(experiment_root or ".") / \
+            cfg.prompts_file
         if not path.exists():
             raise PromptError(f"{path.name} not found; run `fungus prompt` to click on the target")
         prompts = Prompts.load(path)

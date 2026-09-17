@@ -124,6 +124,7 @@ def suggest_frames(
     device: str = "auto",
     prob_fn: ProbFn | None = None,
     threshold: float | None = None,
+    camera: str | None = None,
     progress=None,
 ) -> Suggestion:
     """Score frames and add the ``count`` most useful ones to the dataset (unreviewed).
@@ -140,8 +141,8 @@ def suggest_frames(
     if prob_fn is None and not (run and against):
         raise ValueError("give a trained model (--model), or two runs to compare "
                          "(--run and --against)")
-    runs = [resolve_run(experiment, r) for r in (run, against) if r]
-    analyzer = Analyzer(experiment, with_segmenter=False)
+    runs = [resolve_run(experiment, r, camera) for r in (run, against) if r]
+    analyzer = Analyzer(experiment, with_segmenter=False, camera=camera)
     window = frame_window(analyzer, crop_to_roi, margin_px)
     frames = analyzer.frames
 

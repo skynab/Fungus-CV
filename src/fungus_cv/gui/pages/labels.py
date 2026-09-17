@@ -537,7 +537,7 @@ class LabelsPage(QWidget):
         if exp is None or self.dataset is None:
             self._error("Open an experiment (for its frames) and a dataset first.")
             return
-        dialog = AddFramesDialog(self, [r.run_id for r in list_runs(exp)])
+        dialog = AddFramesDialog(self, [r.run_id for r in list_runs(exp, self.state.camera)])
         if dialog.exec() == QDialog.Accepted:
             self.add_frames(**dialog.values())
 
@@ -545,6 +545,7 @@ class LabelsPage(QWidget):
                    against: str | None = None, model: str | None = None,
                    count: int = 20) -> None:
         exp, ds = self.state.experiment, self.dataset
+        camera = self.state.camera
         if exp is None or ds is None:
             self._error("Open an experiment (for its frames) and a dataset first.")
             return
@@ -558,13 +559,14 @@ class LabelsPage(QWidget):
             from fungus_cv.learn.export import export_from_run
 
             if method == "evenly":
-                chosen = run or (list_runs(exp)[-1].run_id if list_runs(exp) else None)
+                runs = list_runs(exp, camera)
+                chosen = run or (runs[-1].run_id if runs else None)
                 if chosen is None:
                     raise ValueError("no analysis runs yet: run Analyze first")
-                return "evenly", export_from_run(exp, ds, chosen, count=count)
+                return "evenly", export_from_run(exp, ds, chosen, count=count, camera=camera)
             result = suggest_frames(exp, ds, count=count,
                                     model_dir=Path(model) if model else None,
-                                    run=run, against=against)
+                                    run=run, against=against, camera=camera)
             return "suggest", result.added
 
         run_task(work, self._added, self._busy_failed)

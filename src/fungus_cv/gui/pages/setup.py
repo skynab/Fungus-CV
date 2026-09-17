@@ -141,6 +141,7 @@ class SetupPage(QWidget):
 
         state.experiment_changed.connect(lambda _: self._invalidate())
         state.config_changed.connect(self._invalidate)
+        state.camera_changed.connect(lambda _: self._invalidate())
         self._tool_changed()
         self._loaded_for = None
 
@@ -163,12 +164,14 @@ class SetupPage(QWidget):
         if exp is None:
             return
         self._loaded_for = exp.root
+        camera = self.state.camera
         self.message.setText("Preparing the reference frame (aligning, correcting)…")
 
         def work(progress, should_stop):
             from fungus_cv.analyze.pipeline import Analyzer
 
-            analyzer = Analyzer(exp, with_segmenter=False, require_annotations=False)
+            analyzer = Analyzer(exp, with_segmenter=False, require_annotations=False,
+                                camera=camera)
             return analyzer, analyzer.reference
 
         run_task(work, self._loaded, lambda m: self.message.setText(
@@ -433,6 +436,6 @@ class SetupPage(QWidget):
             return
         from fungus_cv.analyze.pipeline import annotations_path
 
-        ann.save(annotations_path(exp))
+        ann.save(annotations_path(exp, self.state.camera))
         self.message.setText("Saved measurement setup (annotations.json). Next: Analyze.")
         self.state.config_changed.emit()

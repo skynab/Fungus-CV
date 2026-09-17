@@ -14,12 +14,14 @@ MAX_RECENT = 10
 class AppState(QObject):
     experiment_changed = Signal(object)  # Experiment or None
     config_changed = Signal()
+    camera_changed = Signal(object)  # which camera the pages work on (None = the only one)
     busy_changed = Signal(bool)  # a capture is running (pages should not change settings)
 
     def __init__(self, settings: QSettings | None = None):
         super().__init__()
         self.settings = settings or QSettings()
         self.experiment: Experiment | None = None
+        self.camera: str | None = None  # with several cameras, the one being worked on
         self.capturing = False
 
     # --- experiments -------------------------------------------------------------------
@@ -27,6 +29,8 @@ class AppState(QObject):
     def open(self, path: Path) -> Experiment:
         experiment = Experiment(Path(path))  # raises with a readable message if invalid
         self.experiment = experiment
+        self.camera = experiment.config.cameras[0].name if len(
+            experiment.config.cameras) > 1 else None
         self._remember(experiment.root)
         self.experiment_changed.emit(experiment)
         return experiment
@@ -44,6 +48,17 @@ class AppState(QObject):
     def close(self) -> None:
         self.experiment = None
         self.experiment_changed.emit(None)
+
+    def set_camera(self, camera: str | None) -> None:
+        if camera != self.camera:
+            self.camera = camera
+            self.camera_changed.emit(camera)
+
+    def results_dir(self):
+        """Where the current camera's results live."""
+        from fungus_cv.analyze.pipeline import results_dir_for
+
+        return None if self.experiment is None else results_dir_for(self.experiment, self.camera)
 
     def set_capturing(self, value: bool) -> None:
         self.capturing = value

@@ -8,7 +8,22 @@ Works on Windows, macOS and Linux (Python 3.10+).
 
 ## Desktop app
 
-Fungus-CV has a desktop app with a page for each step: **Experiment** (open or create, key settings) → **Camera** (live preview) → **Capture** (scheduled photos with progress) → **Set up measurement** (click the base, stem path, region or field plots; drag over colours) → **Analyze** (per-frame results with overlays) → **Report** (fits and charts) → **Diagnostics**.
+Fungus-CV has a desktop app with a page for each step, grouped in the sidebar:
+
+| Section | Page | What it does |
+|---|---|---|
+| Capture | **Experiment** | open or create an experiment, key settings |
+| | **Camera** | live preview for framing and focus |
+| | **Capture** | scheduled photos with progress; optionally **measures new frames as they arrive** and charts them live |
+| Measure | **Set up measurement** | click the base, stem path, region or field plots; drag over colours |
+| | **SAM prompts** | click on the target (or the stem) and see SAM 2's mask; save prompts per frame |
+| | **Analyze** | run the analysis; per-frame results shown as the overlay, the aligned frame with its mask, or the photo as taken; **exclude a frame by hand with a reason** |
+| | **Report** | fits with standard errors, bootstrap intervals, AICc weights and warnings; charts |
+| Models | **Labels** | open or create a dataset; add frames evenly or where a model is least sure; brush and SAM clicks; mark reviewed; rank with a model |
+| | **Train models** | train with a live loss / validation IoU chart, read the model card, use the model for the experiment, evaluate on other labeled data |
+| Results | **Study** | edit a study (replicates and conditions), run it, read condition summaries, comparisons, figures and the methods draft |
+| | **Validation** | Bland–Altman agreement with hand measurements; run the validation suite and save its baseline |
+| This computer | **Diagnostics** | camera permission, cameras, GPU, disk |
 
 ```bash
 pip install -e ".[gui]"
@@ -17,7 +32,7 @@ fungus gui                       # or: fungus gui experiments/dye-test-1
 
 To build a standalone app (`Fungus-CV.app` on macOS, `Fungus-CV.exe` on Windows), see [packaging/README.md](packaging/README.md). **On macOS, the packaged app is the most reliable way to use the camera.** It has its own entry under Privacy & Security → Camera, and macOS asks for permission the first time. When `fungus` runs from a terminal, the permission belongs to that terminal app instead.
 
-The command line below does everything the app does, plus SAM prompting, label editing and model training, which aren't in the app yet.
+Everything in the app can also be done from the command line below, which is handy for scripts and remote machines.
 
 ## Install
 

@@ -33,8 +33,10 @@ def spec(with_models: bool) -> str:
     icon_win = PACKAGING / "build" / "icon.ico"
     excludes = [] if with_models else MODEL_PACKAGES
     hidden = ["fungus_cv.gui.pages." + m for m in
-              ("analyze", "camera", "capture", "doctor", "experiment", "report", "setup")]
+              ("analyze", "camera", "capture", "doctor", "experiment", "labels", "prompt",
+               "report", "setup", "study", "train", "validation")]
     hidden += ["scipy.optimize", "scipy.signal", "scipy.spatial", "scipy.sparse.csgraph",
+               "scipy.stats",
                "matplotlib.backends.backend_agg"]
     if sys.platform == "darwin":
         hidden += ["AVFoundation", "Foundation"]

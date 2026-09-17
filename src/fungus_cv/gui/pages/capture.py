@@ -1,4 +1,4 @@
-"""Run a scheduled capture with live progress."""
+"""Run a scheduled capture with live progress, optionally measuring frames as they arrive."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import cv2
 from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -17,13 +18,18 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from fungus_cv.config import parse_duration
+from fungus_cv.gui.chart import ChartLabel
 from fungus_cv.gui.image_view import ImageView
 from fungus_cv.gui.pages.experiment import _fmt_seconds
+from fungus_cv.gui.pages.report import METRICS
+from fungus_cv.gui.qt_util import preload_model_modules, run_task
+from fungus_cv.gui.theme import INK_2, SERIES
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +69,9 @@ class CapturePage(QWidget):
         self.thread: CaptureThread | None = None
         self.started_at = 0.0
         self._last_count = -1
+        self.watch_task = None  # a live analysis in progress
+        self._watch_again = False  # frames arrived while it ran
+        self.watch_summary = None
 
         settings = QGroupBox("This run")
         form = QFormLayout(settings)
@@ -90,6 +99,20 @@ class CapturePage(QWidget):
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(2000)
         self.last_image = ImageView()
+        self.watch = QCheckBox("Measure new frames as they arrive")
+        self.watch.setToolTip("Needs the measurement set up (Set up measurement page).")
+        self.watch_metric = QComboBox()
+        self.watch_metric.setEditable(True)
+        self.watch_metric.addItems(["(automatic)"] + METRICS)
+        self.watch_metric.currentTextChanged.connect(lambda _: self.draw_live_chart())
+        self.watch_status = QLabel()
+        self.watch_status.setWordWrap(True)
+        self.live_chart = ChartLabel("Measurements appear here as frames are analyzed.")
+        live = QGroupBox("While capturing")
+        live_form = QFormLayout(live)
+        live_form.addRow(self.watch)
+        live_form.addRow("Chart", self.watch_metric)
+        live_form.addRow(self.watch_status)
 
         left = QVBoxLayout()
         left.addWidget(settings)
@@ -97,12 +120,18 @@ class CapturePage(QWidget):
         buttons.addWidget(self.start_btn)
         buttons.addWidget(self.stop_btn)
         left.addLayout(buttons)
+        left.addWidget(live)
         left.addWidget(self.status)
         left.addWidget(QLabel("Log"))
         left.addWidget(self.log, 1)
+        self.right_tabs = QTabWidget()
+        self.right_tabs.addTab(self.last_image, "Latest frame")
+        live_tab = QWidget()
+        live_layout = QVBoxLayout(live_tab)
+        live_layout.addWidget(self.live_chart, 1)
+        self.right_tabs.addTab(live_tab, "Live measurement")
         right = QVBoxLayout()
-        right.addWidget(QLabel("Latest frame"))
-        right.addWidget(self.last_image, 1)
+        right.addWidget(self.right_tabs, 1)
         layout = QHBoxLayout(self)
         layout.addLayout(left, 1)
         layout.addLayout(right, 2)
@@ -174,8 +203,6 @@ class CapturePage(QWidget):
                     cam.close()
             return "; ".join(problems)
 
-        from fungus_cv.gui.qt_util import run_task
-
         run_task(preflight, lambda problem: self._begin(problem),
                  lambda message: self._begin(message), pool="io")
 
@@ -232,6 +259,8 @@ class CapturePage(QWidget):
         if s.saved != self._last_count:
             self._last_count = s.saved
             self._show_latest()
+            if self.watch.isChecked() and s.saved:
+                self.measure_new_frames()
 
     def _show_latest(self, force: bool = False) -> None:
         exp = self.state.experiment
@@ -245,6 +274,90 @@ class CapturePage(QWidget):
         image = cv2.imread(str(exp.root / ok[-1]["file"]))
         if image is not None:
             self.last_image.set_image(image, keep_view=not force)
+
+    # --- live measurement ------------------------------------------------------------------
+
+    def measure_new_frames(self) -> None:
+        """Analyze frames not measured yet (incremental), then redraw the live chart."""
+        exp = self.state.experiment
+        if exp is None:
+            return
+        if self.watch_task is not None:
+            self._watch_again = True
+            return
+        methods = {exp.config.analysis.target.method, exp.config.analysis.reference.method}
+        preload_model_modules(methods)
+        root = exp.root
+        self.watch_status.setText("Measuring new frames…")
+
+        def work(progress, should_stop):
+            from fungus_cv.analyze.pipeline import Analyzer
+            from fungus_cv.storage import Experiment
+
+            return Analyzer(Experiment(root)).run()
+
+        self.watch_task = run_task(work, self._watch_done, self._watch_failed)
+
+    def _watch_finished(self) -> None:
+        self.watch_task = None
+        if self._watch_again:
+            self._watch_again = False
+            self.measure_new_frames()
+
+    def _watch_done(self, summary) -> None:
+        self.watch_summary = summary
+        flags = ", ".join(f"{k} {v}" for k, v in summary.flagged.items())
+        self.watch_status.setText(
+            f"Measured {summary.processed} new frame(s)"
+            + (f", {summary.failed} failed" if summary.failed else "")
+            + (f" · flags: {flags}" if flags else "") + ".")
+        self.draw_live_chart()
+        self._watch_finished()
+
+    def _watch_failed(self, message: str) -> None:
+        self.watch_status.setText(f"<span style='color:#b00020'>Not measured: {message}</span>")
+        self._watch_finished()
+
+    def draw_live_chart(self) -> None:
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        from fungus_cv.analyze.report import _style, list_plots, load_series
+
+        exp = self.state.experiment
+        chosen = self.watch_metric.currentText().strip()
+        metric = None if chosen in ("", "(automatic)") else chosen
+        if exp is None or not (exp.root / "results" / "measurements.csv").exists():
+            return
+        try:
+            plots = list_plots(exp)
+            series = [load_series(exp, metric, plot) for plot in plots]
+        except (FileNotFoundError, ValueError) as exc:
+            self.watch_status.setText(f"<span style='color:#b00020'>{exc}</span>")
+            return
+        fig, ax = plt.subplots(figsize=(7, 4), dpi=110)
+        _style(ax)
+        for i, s in enumerate(series):
+            color = SERIES[i % len(SERIES)]
+            use = s.use
+            label = s.plot if len(series) > 1 else "measured"
+            if np.isfinite(s.unc[use]).any():
+                ax.errorbar(s.t[use], s.y[use], yerr=s.unc[use], fmt="o-", ms=4, lw=1.2,
+                            color=color, ecolor=color, elinewidth=0.8, label=label)
+            else:
+                ax.plot(s.t[use], s.y[use], "o-", ms=4, lw=1.2, color=color, label=label)
+            if (~use).any():
+                ax.plot(s.t[~use], s.y[~use], "x", ms=6, color=INK_2,
+                        label="excluded" if i == 0 else None)
+        ax.set_xlabel(f"Time since first frame ({series[0].time_unit})")
+        metric = series[0].metric
+        ax.set_ylabel(metric)
+        n = int(sum(len(s.rows) for s in series))
+        ax.set_title(f"{exp.config.name}: {metric} ({n} measurement(s))", loc="left",
+                     fontsize=11)
+        ax.legend(frameon=False, fontsize=8)
+        fig.tight_layout()
+        self.live_chart.set_figure(fig)
 
     def shutdown(self) -> None:
         if self.thread is not None:

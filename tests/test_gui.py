@@ -550,3 +550,42 @@ def test_validation_page_hand_measurements_and_suite(window, qtbot, experiment, 
     assert validation.suite_table.item(0, 5).text() == "pass"
     validation.only_checked.setChecked(False)
     assert validation.suite_table.rowCount() > 5
+
+
+def test_capture_page_measures_new_frames_live(window, qtbot, experiment):
+    from datetime import timedelta
+
+    from fungus_cv.storage import FrameRecord, encode_image, iso_utc
+
+    from .test_pipeline import T0
+
+    build_experiment(experiment, minutes=range(0, 3), bump_at=-1)
+    window.open_experiment(experiment.root)
+    capture = page(window, "Capture")
+    capture.watch.setChecked(True)
+    capture.measure_new_frames()
+    capture.measure_new_frames()  # while one runs, the next is queued, not run twice
+    qtbot.waitUntil(lambda: capture.watch_task is None and capture.watch_summary is not None,
+                    timeout=60000)
+    assert capture.watch_summary.processed + capture.watch_summary.skipped_existing == 3
+    assert capture.live_chart.image is not None
+    assert "Measured" in capture.watch_status.text()
+
+    exp = Experiment(experiment.root)
+    for minute in (3, 4):  # two new photos arrive
+        ts = T0 + timedelta(minutes=minute)
+        path = exp.save_bytes(encode_image(syn.scene(60 * minute), "png"), ts, "cam0", "png")
+        exp.append_frame(FrameRecord(timestamp_utc=iso_utc(ts), camera="cam0", status="ok",
+                                     file=exp.relative(path), width=syn.W, height=syn.H))
+    capture.watch_summary = None
+    capture.measure_new_frames()
+    qtbot.waitUntil(lambda: capture.watch_summary is not None and capture.watch_task is None,
+                    timeout=60000)
+    assert capture.watch_summary.processed == 2 and capture.watch_summary.skipped_existing == 3
+
+    (experiment.root / "annotations.json").unlink()
+    capture.watch_summary = None
+    capture.measure_new_frames()
+    qtbot.waitUntil(lambda: capture.watch_task is None and "Not measured" in
+                    capture.watch_status.text(), timeout=60000)
+    assert "annotate" in capture.watch_status.text()

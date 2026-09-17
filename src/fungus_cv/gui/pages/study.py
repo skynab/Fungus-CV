@@ -186,6 +186,7 @@ class StudyPage(QWidget):
         splitter.addWidget(self.tabs)
         splitter.setSizes([520, 700])
         QVBoxLayout(self).addWidget(splitter)
+        self._conditions_changed()
         self._update_buttons()
 
     # --- editing ---------------------------------------------------------------------------

@@ -589,3 +589,16 @@ def test_capture_page_measures_new_frames_live(window, qtbot, experiment):
     qtbot.waitUntil(lambda: capture.watch_task is None and "Not measured" in
                     capture.watch_status.text(), timeout=60000)
     assert "annotate" in capture.watch_status.text()
+
+
+def test_file_menu_archives_the_experiment(window, qtbot, experiment, tmp_path):
+    from fungus_cv.analyze import archive
+
+    build_experiment(experiment, minutes=range(0, 3), bump_at=-1)
+    window.open_experiment(experiment.root)
+    out = tmp_path / "bundle.zip"
+    window.archive_experiment(out=out, frames=False)
+    qtbot.waitUntil(lambda: out.exists() and "Wrote" in window.statusBar().currentMessage(),
+                    timeout=60000)
+    assert archive.verify(out).ok
+    assert "0 photo(s)" in window.statusBar().currentMessage()

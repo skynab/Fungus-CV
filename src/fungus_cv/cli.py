@@ -868,6 +868,60 @@ def study(
     typer.echo(f"wrote {result.out_dir} (methods.md has a draft methods paragraph)")
 
 
+@app.command()
+def archive(
+    target: Path = typer.Argument(None, help="Experiment folder, or a study YAML file."),
+    out: Path = typer.Argument(None, help="Bundle to write, e.g. dye-test-1.zip."),
+    frames: bool = typer.Option(False, help="Include the photos (much larger; their hashes "
+                                "are recorded either way)."),
+    masks: bool = typer.Option(False, help="Include masks and overlays (analyze recreates "
+                               "them)."),
+    weights: bool = typer.Option(False, help="Include trained model weights."),
+    verify: Path | None = typer.Option(None, help="Instead: check a bundle against its "
+                                       "manifest."),
+) -> None:
+    """Pack everything needed to reproduce a result into one zip (for a data repository)."""
+    from fungus_cv.analyze import archive as archive_mod
+
+    _setup_logging()
+    if verify is not None:
+        try:
+            check = archive_mod.verify(verify)
+        except (OSError, ValueError, KeyError) as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(1) from exc
+        env = check.manifest.get("environment", {})
+        typer.echo(f"{verify}: {check.manifest.get('kind', '?')} bundle, {check.files} file(s), "
+                   f"made {check.manifest.get('created_utc', '?')} with fungus-cv "
+                   f"{env.get('fungus_cv_version', '?')}"
+                   + (f" (commit {env['git_commit'][:10]})" if env.get("git_commit") else ""))
+        for name, items in (("changed", check.changed), ("missing", check.missing)):
+            for item in items[:10]:
+                typer.secho(f"  {name}: {item}", fg=typer.colors.RED)
+        if check.extra:
+            typer.echo(f"  {len(check.extra)} file(s) not in the manifest")
+        typer.secho("Bundle is intact." if check.ok else "Bundle does NOT match its manifest.",
+                    fg=typer.colors.GREEN if check.ok else typer.colors.RED)
+        if not check.ok:
+            raise typer.Exit(1)
+        return
+    if target is None or out is None:
+        typer.secho("give an experiment folder (or study file) and the bundle to write, or "
+                    "--verify BUNDLE", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    try:
+        result = archive_mod.build(target, out, frames=frames, masks=masks, weights=weights)
+    except (OSError, ValueError, FileNotFoundError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    size = result.bytes_stored / 1e6
+    typer.echo(f"Wrote {result.path} ({size:.1f} MB, {result.files} file(s); "
+               f"{result.frames_included} of {result.frames_recorded} photo(s) included).")
+    for note in result.notes:
+        typer.secho(f"note: {note}", fg=typer.colors.YELLOW)
+    typer.echo("Check it any time with `fungus archive --verify " + str(result.path) + "`.")
+
+
 @app.command("validate-suite")
 def validate_suite_cmd(
     suite: Path = typer.Argument(..., help="Suite YAML listing experiments, hand labels, models "

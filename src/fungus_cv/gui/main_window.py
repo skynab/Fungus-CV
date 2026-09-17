@@ -147,9 +147,13 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self.open_experiment)
         reveal = QAction("Show Experiment Folder", self)
         reveal.triggered.connect(self.reveal_experiment)
+        archive = QAction("Archive Experiment…", self)
+        archive.setToolTip("Pack settings, annotations and results into one zip with a hash "
+                           "manifest, for a data repository.")
+        archive.triggered.connect(self.archive_experiment)
         quit_action = QAction("Quit", self, shortcut=QKeySequence.Quit)
         quit_action.triggered.connect(self.close)
-        for action in (new_action, open_action, reveal):
+        for action in (new_action, open_action, reveal, archive):
             file_menu.addAction(action)
         file_menu.addSeparator()
         file_menu.addAction(quit_action)
@@ -193,6 +197,44 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as exc:
             show_error(self, "Could not open experiment",
                        f"{path}\n\n{exc}\n\nChoose a folder containing config.yaml.")
+
+    def archive_experiment(self, out: Path | None = None, frames: bool | None = None) -> None:
+        """Bundle the open experiment; asks where to save it and whether to include photos."""
+        from fungus_cv.analyze import archive as archive_mod
+        from fungus_cv.gui.qt_util import run_task
+
+        exp = self.state.experiment
+        if exp is None:
+            show_error(self, "No experiment open", "Open an experiment first.")
+            return
+        if out is None:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save bundle", str(Path.home() / f"{exp.root.name}.zip"), "Zip (*.zip)")
+            if not path:
+                return
+            out = Path(path)
+        if frames is None:
+            answer = QMessageBox.question(
+                self, "Include the photos?",
+                "Include every photo in the bundle?\n\nWithout them the bundle is small and "
+                "still records each photo's hash, so a separate image archive can be checked "
+                "against it.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            frames = answer == QMessageBox.Yes
+        self.statusBar().showMessage("Writing the bundle…")
+
+        def work(progress, should_stop):
+            return archive_mod.build(exp.root, out, frames=frames)
+
+        run_task(work, self._archived, self._archive_failed)
+
+    def _archived(self, result) -> None:
+        self.statusBar().showMessage(
+            f"Wrote {result.path.name} ({result.bytes_stored / 1e6:.1f} MB, "
+            f"{result.frames_included} photo(s) included)", 15000)
+
+    def _archive_failed(self, message: str) -> None:
+        self.statusBar().clearMessage()
+        show_error(self, "Could not write the bundle", message)
 
     def reveal_experiment(self) -> None:
         if self.state.experiment is not None:

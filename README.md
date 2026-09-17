@@ -145,6 +145,22 @@ Output files:
 - `results/report/`: the main plot, a quality-check plot, `fits.json` (every statistic above) and an optional overlay video.
 - Frames where the front moves back by more than 3σ are circled as worth checking.
 
+## Archiving a result (for a paper or a data repository)
+
+```bash
+fungus archive experiments/dye-test-1 dye-test-1.zip            # settings + results
+fungus archive experiments/dye-test-1 dye-test-1.zip --frames   # also the photos
+fungus archive studies/moss.yaml moss-study.zip                 # a study and every replicate
+fungus archive --verify dye-test-1.zip                          # check it later
+```
+
+The bundle holds `config.yaml`, `frames.csv`, annotations, hand exclusions, SAM prompts, measurements, reports, study results and the card of every trained model used.
+
+- **Manifest:** `manifest.json` lists every file with its SHA-256 hash, **every photo's hash whether or not the photos are included**, the model weights' hash, and the versions of every installed package plus the fungus-cv version and git commit.
+- **Left out by default:** masks and overlays (`analyze` recreates them), SAM tracking state, and the photos. Add them with `--masks`, `--weights` and `--frames`.
+- **Checking:** `--verify` re-hashes everything and reports files that changed or went missing, so a download or a long-term archive can be trusted. Exit code 1 if anything fails.
+- **In the app:** File → Archive Experiment…
+
 ## Studies: replicates and conditions
 
 A study compares conditions (e.g. treated vs control) across replicate experiments:

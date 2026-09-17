@@ -28,6 +28,18 @@ def pick_evenly(n: int, count: int) -> list[int]:
     return sorted({round(i * (n - 1) / (count - 1)) for i in range(count)})
 
 
+def frame_item_id(experiment: Experiment, frame_stem: str) -> str:
+    return safe_id(f"{experiment.config.name}__{frame_stem}")
+
+
+def frame_window(analyzer: Analyzer, crop_to_roi: bool = True, margin_px: int = 32) -> CropWindow:
+    """The part of each aligned frame that goes into a dataset: the region plus a margin."""
+    h, w = analyzer.reference.shape[:2]
+    if crop_to_roi and analyzer.annotations is not None:
+        return CropWindow.around(analyzer.annotations.roi, margin_px, w, h)
+    return CropWindow.full(w, h)
+
+
 def export_from_run(
     experiment: Experiment,
     dataset: Dataset,
@@ -51,16 +63,14 @@ def export_from_run(
     if not candidates:
         raise ValueError(f"run {run_info.run_id} has no masks for this experiment's frames")
 
-    h, w = analyzer.reference.shape[:2]
-    window = (CropWindow.around(analyzer.annotations.roi, margin_px, w, h) if crop_to_roi
-              else CropWindow.full(w, h))
+    window = frame_window(analyzer, crop_to_roi, margin_px)
     group = group or experiment.config.name
     added = []
     for k in pick_evenly(len(candidates), count):
         index = candidates[k]
         row = frames[index]
         stem = Path(row["file"]).stem
-        item_id = safe_id(f"{experiment.config.name}__{stem}")
+        item_id = frame_item_id(experiment, stem)
         if dataset.get(item_id) and not replace:
             log.info("skipping %s (already in dataset)", item_id)
             continue

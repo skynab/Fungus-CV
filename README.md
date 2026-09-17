@@ -357,7 +357,7 @@ fungus dataset export experiments/moss-2 datasets/moss-bark --count 30   # more 
 fungus dataset add-pairs datasets/moss-bark photos/ masks/ --group field-2026   # masks made elsewhere
 
 # 2. Correct the masks: left drag paints, right drag erases; saving marks an item reviewed
-fungus label datasets/moss-bark --unreviewed
+fungus label datasets/moss-bark --unreviewed --sam     # m: click with SAM, then touch up
 fungus dataset info datasets/moss-bark
 
 # 3. Train (GPU if available) and check on data the model has not seen
@@ -366,7 +366,41 @@ fungus evaluate models/moss-bark-v1 datasets/moss-bark-test
 
 # 4. Use it: analysis.target.method: model, analysis.target.model.path: <model folder>
 fungus analyze experiments/moss-3
+
+# 5. Improve it: label the frames the model is least sure about, retrain
+fungus dataset suggest experiments/moss-3 datasets/moss-bark --model models/moss-bark-v1 --count 20
+fungus label datasets/moss-bark --unreviewed --by-priority --sam
+fungus train datasets/moss-bark models/moss-bark-v2
 ```
+
+### Labeling the most useful frames first (active learning)
+
+Evenly spaced frames mostly repeat what the model already gets right. `fungus dataset suggest` scores an experiment's frames and adds the most informative ones as unreviewed items:
+
+| Source | Score | When |
+|---|---|---|
+| `--model M` | **TTA disagreement**: 1 − IoU between the model's mask and its masks for the image flipped left-right, 15% darker and 15% brighter; **ambiguous fraction**: pixels with probability 0.25–0.75, as a share of those plus the predicted target | after the first model |
+| `--model M --run R` | the above plus **disagreement** between the model and run R's masks (e.g. SAM) | the model and SAM disagree |
+| `--run A --against B` | **run disagreement**: 1 − IoU between two runs' masks, e.g. SAM vs colour, or two thresholds | first round, no model yet |
+
+- **Score:** the mean of the available components, from 0 (confident) to 1. Scores are relative to the target's size, so compare them within a dataset.
+- **Spread in time:** picks are kept apart so near-identical consecutive frames aren't chosen together. Frames already in the dataset are skipped.
+- **Candidates:** up to `--max-candidates 200` evenly spaced frames are scored.
+- **Starting mask:** run R's mask if given, otherwise the model's prediction.
+- **Record:** every candidate's scores go to `<dataset>/suggestions/<experiment>_<time>.csv`. The score is stored on each item (`priority`, `scores` in `dataset.json`).
+- **Items already in a dataset:** `fungus dataset rank DATASET --model M` scores unreviewed items the same way. It also scores disagreement between the model and each item's current mask, which is a good way to find a poor SAM pre-label. `--include-reviewed` looks for label mistakes too.
+- **Order:** `fungus label --by-priority` shows the highest-scoring items first.
+
+### Clicking with SAM while labeling
+
+`fungus label DATASET --sam` (needs the `sam` extra; `--sam-model` picks the size):
+
+1. Press **m** to switch to SAM clicks.
+2. Left-click the target, right-click what isn't, or press **b** for a box. SAM's mask appears as a yellow outline.
+3. Press **Enter** to replace the mask, **+** to add to it or **−** to subtract from it.
+4. Press **m** again to fix details with the brush.
+
+Undo (`z`) covers SAM edits too. A single click on synthetic dye matched the true area with IoU 0.997 (SAM 2-tiny).
 
 - **Model:** a U-Net with an ImageNet-pretrained ResNet encoder (`resnet34` by default, `resnet18` is faster). It has a full-resolution path so mask edges aren't blurred. Large frames are processed in overlapping tiles.
 - **Training data:** only **reviewed** labels are used by default, so model quality depends on labels a person checked. `--include-unreviewed` overrides this.

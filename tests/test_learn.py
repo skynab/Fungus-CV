@@ -185,6 +185,11 @@ def test_train_then_analyze_with_model(experiment, tmp_path):
     rows, summary = evaluate_model(tmp_path / "model", ds, device="cpu")
     assert summary["not_in_training_set"]["n"] == result.n_val
 
+    from fungus_cv.learn.active import rank_items
+
+    ranked = rank_items(ds, tmp_path / "model", include_reviewed=True, device="cpu")
+    assert len(ranked) == 9 and all(0 <= i.priority <= 1 for i in ranked)
+
     text = exp.config_path.read_text().replace("method: color", "method: model", 1)
     text = text.replace('path: ""', f"path: '{tmp_path / 'model'}'").replace(
         "device: auto", "device: cpu")

@@ -3,7 +3,8 @@
 The analysis is two-stage, the standard approach for replicated growth curves:
 
 1. Each replicate (one experiment, or one plot of one) is fitted on its own with the same
-   model, weighted by the per-frame uncertainties, with block-bootstrap intervals.
+   model, weighted by the per-frame uncertainties, with independent or AR(1) frame errors
+   and bootstrap intervals.
 2. Its parameter estimates (e.g. the logistic rate ``r``) are the data for between-condition
    statistics, so the replicate is the unit of inference and frames of one time-lapse are
    never treated as independent samples.

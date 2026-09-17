@@ -313,12 +313,31 @@ def prompt_target(image: np.ndarray, frame_file: str, preview=None,
         cv2.destroyWindow(view.window)
 
 
-def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False) -> dict:
+def combine_masks(mask: np.ndarray, proposal: np.ndarray, mode: str) -> np.ndarray:
+    """Apply a SAM proposal to a label: ``replace``, ``add`` (union) or ``subtract``."""
+    if mode == "replace":
+        return proposal.copy()
+    if mode == "add":
+        return mask | proposal
+    if mode == "subtract":
+        return mask & ~proposal
+    raise ValueError(f"unknown mode {mode!r}")
+
+
+def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False,
+                by_priority: bool = False, sam=None) -> dict:
     """Brush editor for dataset masks. Saving an item marks it reviewed.
 
-    Returns counts of saved and skipped items.
+    ``by_priority`` shows the most useful items first (`fungus dataset rank`/`suggest`).
+    ``sam(image, FramePrompt) -> mask`` enables click-to-segment: press m, click the target
+    (left) and what isn't (right), then replace, add to or subtract from the mask.
+    Returns counts of saved and shown items.
     """
     items = [i for i in dataset.items if not (only_unreviewed and i.reviewed)]
+    if by_priority:
+        from fungus_cv.learn.active import by_priority as order
+
+        items = order(items)
     if not items:
         return {"saved": 0, "shown": 0}
     window = "fungus label"
@@ -327,15 +346,47 @@ def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False) -> dict:
     counts = {"saved": 0, "shown": 0}
     brush = 8
     state: dict = {}
+    clicks: dict = {}
+
+    def reset_clicks() -> None:
+        clicks.update(points=[], labels=[], box=None, drag=None, box_mode=False,
+                      proposal=None, dirty=False, error="")
 
     def load(i: int) -> None:
         item = items[i]
         image = dataset.load_image(item)
         state.update(item=item, image=image, mask=dataset.load_mask(item),
                      undo=[], view=_View(image, window), painting=0, dirty=False,
-                     show_mask=True)
+                     show_mask=True, sam_mode=state.get("sam_mode", False))
+        reset_clicks()
         counts["shown"] += 1
         cv2.setMouseCallback(window, on_mouse)
+
+    def sam_mouse(event, x, y) -> None:
+        full = state["view"].to_full(x, y)
+        if clicks["box_mode"]:
+            if event == cv2.EVENT_LBUTTONDOWN:
+                clicks["drag"] = full
+            elif event == cv2.EVENT_LBUTTONUP and clicks["drag"] is not None:
+                (x0, y0), (x1, y1) = clicks["drag"], full
+                clicks["drag"] = None
+                if abs(x1 - x0) > 3 and abs(y1 - y0) > 3:
+                    clicks.update(box=(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)),
+                                  box_mode=False, dirty=True)
+            return
+        if event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_RBUTTONDOWN):
+            clicks["points"].append(full)
+            clicks["labels"].append(POSITIVE if event == cv2.EVENT_LBUTTONDOWN else NEGATIVE)
+            clicks["dirty"] = True
+
+    def apply_proposal(mode: str) -> None:
+        if clicks["proposal"] is None:
+            return
+        state["undo"].append(state["mask"].copy())
+        state["undo"] = state["undo"][-30:]
+        state["mask"] = combine_masks(state["mask"], clicks["proposal"], mode)
+        state["dirty"] = True
+        reset_clicks()
 
     def paint(x: int, y: int, value: bool) -> None:
         fx, fy = state["view"].to_full(x, y)
@@ -347,6 +398,9 @@ def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False) -> dict:
 
     def on_mouse(event, x, y, flags, param):
         state["view"].mouse = (x, y)
+        if state["sam_mode"]:
+            sam_mouse(event, x, y)
+            return
         if event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_RBUTTONDOWN):
             state["undo"].append(state["mask"].copy())
             state["undo"] = state["undo"][-30:]
@@ -369,6 +423,20 @@ def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False) -> dict:
     try:
         while True:
             view = state["view"]
+            if state["sam_mode"] and clicks["dirty"]:
+                clicks.update(dirty=False, proposal=None, error="")
+                try:
+                    prompt = FramePrompt(state["item"].id, list(clicks["points"]),
+                                         list(clicks["labels"]), clicks["box"])
+                except ValueError:
+                    prompt = None  # e.g. only "not target" clicks so far
+                if prompt is not None:
+                    view.show(view.base.copy(), ["running SAM..."])
+                    cv2.waitKey(1)
+                    try:
+                        clicks["proposal"] = np.asarray(sam(state["image"], prompt), bool)
+                    except Exception as exc:  # show the problem instead of crashing the tool
+                        clicks["error"] = str(exc)[:120]
             canvas = view.base.copy()
             if state["show_mask"]:
                 size = (canvas.shape[1], canvas.shape[0])
@@ -380,18 +448,73 @@ def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False) -> dict:
                 edges = cv2.morphologyEx(small.astype(np.uint8), cv2.MORPH_GRADIENT,
                                          np.ones((3, 3), np.uint8)).astype(bool)
                 canvas[edges] = (255, 0, 255)
-            cv2.circle(canvas, view.mouse, brush, (255, 255, 255), 1)
+            if state["sam_mode"]:
+                if clicks["proposal"] is not None:
+                    size = (canvas.shape[1], canvas.shape[0])
+                    small = cv2.resize(clicks["proposal"].astype(np.uint8), size,
+                                       interpolation=cv2.INTER_NEAREST).astype(bool)
+                    edges = cv2.morphologyEx(small.astype(np.uint8), cv2.MORPH_GRADIENT,
+                                             np.ones((3, 3), np.uint8)).astype(bool)
+                    canvas[edges] = (0, 255, 255)
+                for (px, py), lab in zip(clicks["points"], clicks["labels"]):
+                    color = (0, 220, 0) if lab == POSITIVE else (0, 0, 255)
+                    cv2.circle(canvas, view.to_view((px, py)), 6, color, -1)
+                    cv2.circle(canvas, view.to_view((px, py)), 6, (255, 255, 255), 1)
+                if clicks["box"] is not None:
+                    x0, y0, x1, y1 = clicks["box"]
+                    cv2.rectangle(canvas, view.to_view((x0, y0)), view.to_view((x1, y1)),
+                                  (0, 255, 255), 2)
+            else:
+                cv2.circle(canvas, view.mouse, brush, (255, 255, 255), 1)
             view.magnifier(canvas)
             item = state["item"]
             status = "reviewed" if item.reviewed else "NOT reviewed"
             unsaved = "  *unsaved*" if state["dirty"] else ""
-            view.show(canvas, [
-                f"{idx + 1}/{len(items)}  {item.id}  [{status}]{unsaved}",
-                "Left drag: paint target   Right drag: erase   [ ]: brush size   z: undo",
-                "t: toggle mask   s: save (marks reviewed)   a/d: prev/next (saves)   Esc: quit",
-            ])
+            priority = "" if item.priority is None else f"  priority {item.priority:.2f}"
+            lines = [f"{idx + 1}/{len(items)}  {item.id}  [{status}]{priority}{unsaved}"]
+            if state["sam_mode"]:
+                lines += [
+                    "SAM: left click target, right click NOT target, b: box, u: undo click, "
+                    "c: clear",
+                    "Enter: replace mask   +: add   -: subtract   (yellow = SAM)   m: brush mode",
+                ]
+                if clicks["box_mode"]:
+                    lines.append("BOX MODE: drag a box around the target")
+                if clicks["error"]:
+                    lines.append(f"SAM error: {clicks['error']}")
+            else:
+                lines += [
+                    "Left drag: paint target   Right drag: erase   [ ]: brush size   z: undo",
+                    "t: toggle mask   s: save (marks reviewed)   a/d: prev/next (saves)   "
+                    "Esc: quit" + ("   m: SAM clicks" if sam is not None else ""),
+                ]
+            view.show(canvas, lines)
 
             key = cv2.waitKey(15) & 0xFF
+            if key == ord("m") and sam is not None:
+                state["sam_mode"] = not state["sam_mode"]
+                reset_clicks()
+                continue
+            if state["sam_mode"]:
+                if key in ENTER_KEYS:
+                    apply_proposal("replace")
+                elif key in (ord("+"), ord("=")):
+                    apply_proposal("add")
+                elif key == ord("-"):
+                    apply_proposal("subtract")
+                elif key == ord("u") and clicks["points"]:
+                    clicks["points"].pop()
+                    clicks["labels"].pop()
+                    clicks["dirty"] = True
+                    if not clicks["points"] and clicks["box"] is None:
+                        clicks["proposal"] = None
+                elif key == ord("c"):
+                    reset_clicks()
+                elif key == ord("b"):
+                    clicks["box_mode"] = not clicks["box_mode"]
+                if key in ENTER_KEYS or key in (ord("+"), ord("="), ord("-"), ord("u"),
+                                                ord("c"), ord("b")):
+                    continue
             if key == ESC:
                 if state["dirty"]:
                     save()

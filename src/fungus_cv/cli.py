@@ -971,13 +971,90 @@ def dataset_info(dataset: Path = typer.Argument(..., help="Dataset folder.")) ->
                    f"target covers {st['mean_target_pct']}% on average")
 
 
+@dataset_app.command("suggest")
+def dataset_suggest(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    dataset: Path = typer.Argument(..., help="Dataset folder (created if missing)."),
+    model: Path | None = typer.Option(None, help="Trained model: pick frames it is least sure "
+                                      "about."),
+    run: str | None = typer.Option(None, help="Run id/prefix whose masks start the labels (and "
+                                   "that the model or --against is compared with)."),
+    against: str | None = typer.Option(None, help="A second run: pick frames where the two "
+                                       "runs disagree most (no model needed)."),
+    count: int = typer.Option(20, help="How many frames to add."),
+    max_candidates: int = typer.Option(200, help="Frames scored, spread evenly over time."),
+    full_frame: bool = typer.Option(False, help="Export whole frames instead of the region."),
+    group: str | None = typer.Option(None, help="Group name (default: experiment name)."),
+    device: str = typer.Option("auto"),
+) -> None:
+    """Add the frames most worth labeling: where a model is unsure or methods disagree."""
+    from fungus_cv.analyze.pipeline import AnalysisError
+    from fungus_cv.learn.active import suggest_frames
+    from fungus_cv.learn.dataset import Dataset
+
+    exp = _load_experiment(experiment)
+    _setup_logging()
+    ds = Dataset.open_or_create(dataset)
+    try:
+        result = suggest_frames(exp, ds, count=count, model_dir=model, run=run, against=against,
+                                max_candidates=max_candidates, crop_to_roi=not full_frame,
+                                group=group, device=device)
+    except (AnalysisError, ValueError, FileNotFoundError, RuntimeError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    scores = sorted((r["score"] for r in result.candidates), reverse=True)
+    typer.echo(f"Scored {len(result.candidates)} frame(s); added {len(result.added)} "
+               f"(score {min((i.priority for i in result.added), default=0):.2f}-"
+               f"{max((i.priority for i in result.added), default=0):.2f}; median of all "
+               f"{scores[len(scores) // 2]:.2f}).")
+    for item in sorted(result.added, key=lambda i: -i.priority):
+        detail = ", ".join(f"{k} {v:.2f}" for k, v in item.scores.items())
+        typer.echo(f"  {item.priority:.2f}  {item.id}  ({detail})")
+    typer.echo(f"wrote {result.csv_path}")
+    typer.echo(f"Next: `fungus label {ds.root} --unreviewed --by-priority`")
+
+
+@dataset_app.command("rank")
+def dataset_rank(
+    dataset: Path = typer.Argument(..., help="Dataset folder."),
+    model: Path = typer.Option(..., help="Trained model to score the items with."),
+    include_reviewed: bool = typer.Option(False, help="Score reviewed items too (e.g. to find "
+                                          "label mistakes)."),
+    device: str = typer.Option("auto"),
+    top: int = typer.Option(10, help="How many to list."),
+) -> None:
+    """Score unreviewed items so `fungus label --by-priority` shows the most useful first."""
+    from fungus_cv.learn.active import rank_items
+    from fungus_cv.learn.dataset import Dataset
+
+    _setup_logging()
+    try:
+        ds = Dataset.open(dataset)
+        ranked = rank_items(ds, model, include_reviewed=include_reviewed, device=device)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Scored {len(ranked)} item(s). Most worth labeling:")
+    for item in ranked[:top]:
+        detail = ", ".join(f"{k} {v:.2f}" for k, v in item.scores.items()
+                           if isinstance(v, float))
+        typer.echo(f"  {item.priority:.2f}  {item.id}  ({detail})")
+    typer.echo(f"Next: `fungus label {ds.root} --unreviewed --by-priority`")
+
+
 @app.command()
 def label(
     dataset: Path = typer.Argument(..., help="Dataset folder."),
     unreviewed: bool = typer.Option(False, help="Only show items not yet reviewed."),
     start: int = typer.Option(0, help="Item number to start at."),
+    by_priority: bool = typer.Option(False, help="Most useful items first (after `fungus "
+                                     "dataset rank` or `suggest`)."),
+    sam: bool = typer.Option(False, help="Press m to segment with SAM 2 clicks (needs the sam "
+                             "extra)."),
+    sam_model: str = typer.Option("facebook/sam2.1-hiera-small", help="SAM 2 model for --sam."),
+    device: str = typer.Option("auto", help="Device for --sam."),
 ) -> None:
-    """Correct masks with a brush; saving marks an item as reviewed."""
+    """Correct masks with a brush (and SAM clicks); saving marks an item as reviewed."""
     _require_gui()
     from fungus_cv.learn.dataset import Dataset
     from fungus_cv.ui.interactive import edit_labels
@@ -987,7 +1064,22 @@ def label(
     except FileNotFoundError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
-    counts = edit_labels(ds, start=start, only_unreviewed=unreviewed)
+    segment = None
+    if sam:
+        import importlib.util
+
+        if importlib.util.find_spec("torch") is None or \
+                importlib.util.find_spec("transformers") is None:
+            typer.secho('--sam needs PyTorch and transformers: pip install -e ".[sam]"',
+                        fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
+        from fungus_cv.segment.prompts import Prompts
+        from fungus_cv.segment.sam2 import Sam2VideoSegmenter
+
+        segment = Sam2VideoSegmenter(model_name=sam_model, prompts=Prompts(),
+                                     device=device).segment_single
+    counts = edit_labels(ds, start=start, only_unreviewed=unreviewed, by_priority=by_priority,
+                         sam=segment)
     typer.echo(f"Saved {counts['saved']} item(s); "
                f"{sum(i.reviewed for i in ds.items)}/{len(ds.items)} reviewed")
 

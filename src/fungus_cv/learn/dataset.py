@@ -38,6 +38,9 @@ class Item:
     crop: list[int] | None = None  # [x0, y0, x1, y1] in the aligned source frame
     reviewed: bool = False
     notes: str = ""
+    # Active learning: how useful labeling this item is (higher first) and why.
+    priority: float | None = None
+    scores: dict = field(default_factory=dict)
 
 
 @dataclass

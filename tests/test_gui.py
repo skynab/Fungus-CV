@@ -399,3 +399,58 @@ def LabelsPage_reopen(window, path):  # noqa: N802 - reads like the page it buil
     fresh.on_shown()  # reopens the last dataset
     assert fresh.dataset is not None and fresh.dataset.root.resolve() == path.resolve()
     return fresh
+
+
+def test_train_page_trains_evaluates_uses_and_cancels(window, qtbot, experiment, tmp_path):
+    pytest.importorskip("torchvision")
+    from fungus_cv.analyze.compare import list_runs
+    from fungus_cv.analyze.pipeline import analyze
+    from fungus_cv.learn.dataset import Dataset
+    from fungus_cv.learn.export import export_from_run
+
+    build_experiment(experiment, minutes=range(0, 6), bump_at=-1)
+    exp = Experiment(experiment.root)
+    analyze(exp)
+    ds = Dataset.create(tmp_path / "datasets" / "dye")
+    export_from_run(exp, ds, list_runs(exp)[0].run_id, count=6)
+    for item in ds.items:
+        item.reviewed = True
+    ds.save()
+    window.open_experiment(experiment.root)
+
+    train_page = page(window, "Train models")
+    train_page.dataset.setText(str(ds.root))
+    assert train_page.output.text().endswith("models/dye-v1")
+    train_page.encoder.setCurrentText("resnet18")
+    train_page.steps.setValue(20)
+    train_page.batch.setValue(2)
+    train_page.patch.setValue(96)
+    train_page.pretrained.setChecked(False)
+    train_page.device.setCurrentText("cpu")
+    train_page.start()
+    qtbot.waitUntil(lambda: train_page.task is None, timeout=120000)
+    assert train_page.result is not None, train_page.message.text()
+    assert (tmp_path / "models" / "dye-v1" / "model.pt").exists()
+    assert len(train_page.history) >= 5 and train_page.chart.image is not None
+    assert "validation items" in train_page.card.text()
+
+    train_page.eval_dataset.setText(str(ds.root))
+    train_page.evaluate()
+    qtbot.waitUntil(lambda: train_page.evaluation is not None, timeout=120000)
+    assert train_page.eval_table.rowCount() == 2
+    assert train_page.eval_table.item(0, 0).text() == "all (n=6)"
+
+    train_page.use_model()
+    target = Experiment(experiment.root).config.analysis.target
+    assert target.method == "model" and target.model.path.endswith("dye-v1")
+
+    train_page.dataset.setText(str(ds.root))  # suggests dye-v2 now
+    assert train_page.output.text().endswith("models/dye-v2")
+    train_page.steps.setValue(100000)
+    train_page.start()
+    qtbot.waitUntil(lambda: len(train_page.history) >= 1 or train_page.task is None,
+                    timeout=120000)
+    train_page.cancel()
+    qtbot.waitUntil(lambda: train_page.task is None, timeout=120000)
+    assert "cancelled" in train_page.message.text()
+    assert not (tmp_path / "models" / "dye-v2" / "model.pt").exists()

@@ -52,6 +52,18 @@ class TrainConfig:
     tile_px: int = 512
     overlap_px: int = 64
 
+    @classmethod
+    def with_color_jitter(cls, scale: float = 1.0, **fields) -> TrainConfig:
+        """Settings as `fungus train` takes them: colour augmentation scaled by ``scale`` and
+        an evaluation schedule that fits the number of steps."""
+        base = cls()
+        steps = fields.get("steps", base.steps)
+        fields.setdefault("eval_every", max(1, min(base.eval_every, steps // 4 or 1)))
+        return cls(brightness_jitter=base.brightness_jitter * scale,
+                   contrast_jitter=base.contrast_jitter * scale,
+                   hue_jitter_deg=base.hue_jitter_deg * scale,
+                   saturation_jitter=base.saturation_jitter * scale, **fields)
+
 
 # --- data ---------------------------------------------------------------------------------
 
@@ -133,6 +145,10 @@ def _loss(logits, target, torch):
 # --- training ------------------------------------------------------------------------------
 
 
+class TrainingCancelled(RuntimeError):
+    """Raised when ``should_stop`` asks training to stop; nothing is saved."""
+
+
 @dataclass
 class TrainResult:
     out_dir: Path
@@ -184,7 +200,10 @@ def tune_threshold(probs: list[np.ndarray], truths: list[np.ndarray]) -> tuple[f
     return best
 
 
-def train(dataset: Dataset, out_dir: Path, cfg: TrainConfig, progress=None) -> TrainResult:
+def train(dataset: Dataset, out_dir: Path, cfg: TrainConfig, progress=None,
+          should_stop=None) -> TrainResult:
+    """``progress(entry)`` gets each evaluation's loss and validation IoU; ``should_stop()``
+    is checked every step and cancels training (raising ``TrainingCancelled``)."""
     torch = import_torch()
     from fungus_cv.learn.unet import ResNetUNet
 
@@ -217,6 +236,9 @@ def train(dataset: Dataset, out_dir: Path, cfg: TrainConfig, progress=None) -> T
     net.train()
     running = 0.0
     for step in range(1, cfg.steps + 1):
+        if should_stop and should_stop():
+            raise TrainingCancelled(f"training cancelled after {step - 1} of {cfg.steps} steps; "
+                                    "nothing was saved")
         x, y = _batch(sampler, cfg.batch_size, torch, device)
         loss = _loss(net(x), y, torch)
         optimizer.zero_grad(set_to_none=True)

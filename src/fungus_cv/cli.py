@@ -1147,16 +1147,11 @@ def train_cmd(
     except FileNotFoundError as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
-    base = TrainConfig()
-    cfg = TrainConfig(
+    cfg = TrainConfig.with_color_jitter(
+        color_jitter,
         encoder=encoder, pretrained=pretrained, patch_px=patch_px, batch_size=batch_size,
-        steps=steps, eval_every=max(1, min(base.eval_every, steps // 4 or 1)),
-        learning_rate=learning_rate, val_groups=list(val_group),
+        steps=steps, learning_rate=learning_rate, val_groups=list(val_group),
         reviewed_only=not include_unreviewed, flip_vertical=flip_vertical, rotate90=rotate90,
-        brightness_jitter=base.brightness_jitter * color_jitter,
-        contrast_jitter=base.contrast_jitter * color_jitter,
-        hue_jitter_deg=base.hue_jitter_deg * color_jitter,
-        saturation_jitter=base.saturation_jitter * color_jitter,
         device=device, seed=seed,
     )
     try:

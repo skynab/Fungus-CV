@@ -338,13 +338,35 @@ def import_(
         None, help="Time zone of the photos' clock, e.g. America/Chicago (default: local)."
     ),
     recursive: bool = typer.Option(False, "--recursive", "-r"),
+    watch: bool = typer.Option(False, help="Keep importing as photos appear (a synced folder "
+                               "from a camera in the field)."),
+    poll: str = typer.Option("1m", help="How often to look for new photos with --watch."),
+    settle: str = typer.Option("10s", help="Ignore files changed this recently: a sync may "
+                               "still be writing them (0 to import immediately)."),
 ) -> None:
     """Import existing photos, ordered by capture time (EXIF, file name, or file date)."""
-    from fungus_cv.capture.importer import import_folder
+    from fungus_cv.capture.importer import import_folder, watch_folder
 
     exp = _load_experiment(experiment)
     _setup_logging()
-    records = import_folder(exp, folder, camera=camera, timezone_name=tz, recursive=recursive)
+    settle_seconds = 0.0 if settle.strip().rstrip("s") in ("", "0") else parse_duration(settle)
+    if watch:
+        typer.echo(f"Watching {folder} every {poll}; Ctrl+C to stop.")
+
+        def report(records) -> None:
+            typer.echo(f"imported {len(records)} new photo(s); last "
+                       f"{records[-1].file.split('/')[-1]}")
+
+        try:
+            total = watch_folder(exp.root, folder, camera=camera, timezone_name=tz,
+                                 recursive=recursive, poll_seconds=parse_duration(poll),
+                                 settle_seconds=settle_seconds, on_batch=report)
+        except KeyboardInterrupt:
+            total = 0
+        typer.echo(f"Stopped after importing {total} photo(s) this session.")
+        return
+    records = import_folder(exp, folder, camera=camera, timezone_name=tz, recursive=recursive,
+                            settle_seconds=settle_seconds)
     sources = Counter(r.source for r in records)
     typer.echo(f"Imported {len(records)} image(s): {dict(sources)}")
 

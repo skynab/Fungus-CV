@@ -534,6 +534,39 @@ experiments/dye-test-1/
 - Not every webcam or OS supports every control. OpenCV on **macOS** usually cannot set exposure, white balance or focus. You'll see a warning in the log, and the `notes` column records it. On **Windows**, press `d` in `fungus preview` to open the driver's settings window.
 - Use steady, controlled lighting, avoid sunlight that changes during the day, mount the camera rigidly, and PNG output (the default).
 
+## Capturing in the field
+
+A camera in the field usually only takes photos; the measuring happens on a laptop. Photos reach the laptop over rsync, Syncthing, a phone's photo folder or an SD card, and `--watch` picks them up as they land:
+
+```bash
+# on the laptop: import, measure and keep an eye on the run
+fungus import experiments/field-1 ~/synced/field-1 --watch --camera pi --tz America/Chicago &
+fungus analyze experiments/field-1 --watch &
+fungus health experiments/field-1 --watch --every 30m --webhook https://hooks.example/...
+```
+
+- **Already imported photos are skipped** (they are matched by content, not by name), so `--watch` can run forever and a re-sync never duplicates anything.
+- **Half-copied files are skipped:** anything changed in the last `--settle` (10 s) waits for the next pass, so a photo is never imported mid-copy. Use `--settle 0` to import immediately.
+- **A folder that disappears** (an unmounted drive, a dropped network share) is waited for, not an error.
+- Times come from EXIF, then the file name, then the file date; `--tz` says which zone a camera's clock is in.
+
+### On a Raspberry Pi (or any headless computer)
+
+```bash
+sudo apt install python3-opencv python3-pip
+pip install fungus-cv                      # or: pip install -e . from a copy of this repo
+fungus cameras                             # a Pi camera appears through V4L2 as /dev/video0
+fungus init experiments/field-1
+fungus snap experiments/field-1            # one test photo; copy it over and check the framing
+fungus service install experiments/field-1 # capture starts at every login/boot
+```
+
+- **Headless:** `capture`, `snap`, `import`, `analyze`, `health` and `status` need no screen. `preview`, `annotate`, `pick-color`, `prompt`, `label` and the app need one — do those on a laptop, using photos copied from the Pi.
+- **Where to analyze:** either sync the photos to a laptop (above), or analyze on the Pi with a colour threshold or a small trained model. SAM 2 is too slow for a Pi.
+- **Sending photos:** a cron job or systemd timer running `rsync -a --remove-source-files experiments/field-1/frames/ laptop:~/synced/field-1/` is enough. Keep `frames.csv` on the Pi as the capture log; the laptop rebuilds its own from the photos it imports.
+- **Power and light:** capture at fixed times of day (sunlight changes), use a controlled light if you can, and mount the camera and markers rigidly.
+- `fungus health --watch --on-alert ...` on the Pi tells you when the camera stops responding or the card fills up.
+
 ## Long unattended runs
 
 - `keep_awake: true` stops the computer from sleeping while it's idle. Closing a laptop lid can still put it to sleep, so change that in the power settings.

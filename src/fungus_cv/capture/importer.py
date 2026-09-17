@@ -1,9 +1,14 @@
-"""Import existing photos (phone, trail camera, Raspberry Pi, ...) into an experiment."""
+"""Import existing photos (phone, trail camera, Raspberry Pi, ...) into an experiment.
+
+``watch_folder`` keeps importing as photos appear, for a camera in the field whose pictures
+are synced to this computer (rsync, Syncthing, a phone's photo folder, an SD card mount).
+"""
 
 from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -90,12 +95,24 @@ def image_timestamp(path: Path, timezone_name: str | None = None) -> tuple[datet
     return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc), "mtime"
 
 
-def find_images(folder: Path, recursive: bool = False) -> list[Path]:
+def find_images(folder: Path, recursive: bool = False,
+                settle_seconds: float = 0.0) -> list[Path]:
+    """Image files in ``folder``; with ``settle_seconds``, ones still being written (changed
+    that recently) are left for the next pass, so half-copied photos are never imported."""
     pattern = "**/*" if recursive else "*"
-    return sorted(
-        p for p in Path(folder).glob(pattern)
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-    )
+    now = time.time()
+    found = []
+    for p in sorted(Path(folder).glob(pattern)):
+        if not p.is_file() or p.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        try:
+            if settle_seconds and now - p.stat().st_mtime < settle_seconds:
+                log.debug("%s changed just now; waiting for the copy to finish", p.name)
+                continue
+        except OSError:  # vanished between listing and checking
+            continue
+        found.append(p)
+    return found
 
 
 def import_folder(
@@ -104,6 +121,7 @@ def import_folder(
     camera: str = "import",
     timezone_name: str | None = None,
     recursive: bool = False,
+    settle_seconds: float = 0.0,
 ) -> list[FrameRecord]:
     """Copy images into ``frames/`` unchanged (keeps EXIF, no re-encoding) and log them.
 
@@ -111,7 +129,7 @@ def import_folder(
     """
     known = {row["sha256"] for row in experiment.read_frames() if row.get("sha256")}
     candidates = []
-    for path in find_images(folder, recursive):
+    for path in find_images(folder, recursive, settle_seconds):
         ts, how = image_timestamp(path, timezone_name)
         candidates.append((ts, path, how))
     candidates.sort()
@@ -147,3 +165,47 @@ def import_folder(
         if how == "mtime":
             log.warning("%s: no EXIF or filename time; used file modification time", path.name)
     return records
+
+
+def watch_folder(
+    experiment_root: Path,
+    folder: Path,
+    camera: str = "import",
+    timezone_name: str | None = None,
+    recursive: bool = False,
+    poll_seconds: float = 60.0,
+    settle_seconds: float = 10.0,
+    on_batch=None,
+    should_stop=None,
+    passes: int | None = None,
+) -> int:
+    """Import photos as they arrive in a synced folder. Returns how many were imported.
+
+    ``passes`` limits how many times the folder is checked (used in tests); otherwise this
+    runs until stopped. A folder that disappears (an unmounted drive) is waited for.
+    """
+    imported = 0
+    seen_passes = 0
+    while passes is None or seen_passes < passes:
+        if should_stop and should_stop():
+            break
+        seen_passes += 1
+        experiment = Experiment(experiment_root)  # re-read frames.csv each pass
+        if not Path(folder).is_dir():
+            log.warning("%s is not there (drive unmounted?); waiting", folder)
+        else:
+            try:
+                records = import_folder(experiment, folder, camera, timezone_name, recursive,
+                                        settle_seconds)
+            except OSError as exc:  # a network share going away must not stop the watch
+                log.error("could not read %s: %s", folder, exc)
+                records = []
+            if records:
+                imported += len(records)
+                log.info("imported %d new photo(s) from %s", len(records), folder)
+                if on_batch:
+                    on_batch(records)
+        if passes is not None and seen_passes >= passes:
+            break
+        time.sleep(poll_seconds)
+    return imported

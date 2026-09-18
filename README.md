@@ -230,6 +230,20 @@ The file lists each experiment (or field plot) with its `condition`, an optional
 
 With 2–3 replicates per condition a t-test has little power. Report the estimates and confidence intervals, not only p-values.
 
+### How many replicates?
+
+```bash
+fungus power --effect 0.05 --sd 0.02                           # SD between replicates, known
+fungus power --study studies/pilot.yaml --param r --effect 20%  # SDs from a pilot study
+fungus power --study studies/pilot.yaml --param max_rate --effect 20% --n 4
+```
+
+- **Simulates the study's own test:** Welch's t-test on per-replicate estimates, with the Holm correction for `--comparisons` treated conservatively.
+- **Output:** the power for 2 to `--n-max` replicates per condition, the number needed for `--target` (80%) power, and with `--n` the smallest difference that many replicates can detect.
+- **From a pilot study:** `--study` takes each condition's SD from `conditions.csv`, and `--effect 20%` means 20% of the reference condition's mean.
+- **Checked against theory:** it matches the noncentral t result as replicates increase. At small counts it gives slightly lower power, because Welch's test doesn't assume equal spreads.
+- **As a rule of thumb:** a difference of one SD between replicates needs about 17 replicates per condition. Reducing the spread between replicates (consistent inoculation, conditions and timing) buys more than extra replicates.
+
 ### Accuracy notes
 - Markers must lie in the same plane as the object, and the camera should face that plane square-on. The analysis warns if marker edges disagree by more than 2%, which suggests a tilted view.
 - Set `--t0` to the moment the towel touched the dye. Otherwise t = 0 is the first photo.

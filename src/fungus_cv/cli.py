@@ -1277,6 +1277,81 @@ def archive(
     typer.echo("Check it any time with `fungus archive --verify " + str(result.path) + "`.")
 
 
+@app.command()
+def power(
+    effect: str = typer.Option(..., help="Difference to detect: a number in the parameter's "
+                               "units, or a percentage of the reference mean with --study "
+                               "(e.g. 20%)."),
+    sd: float | None = typer.Option(None, help="Spread (SD) of the parameter between replicates "
+                                    "of one condition."),
+    sd_b: float | None = typer.Option(None, help="SD in the other condition, if different."),
+    study_file: Path | None = typer.Option(None, "--study", help="Take the SDs (and the "
+                                           "reference mean) from a pilot study already run."),
+    param: str | None = typer.Option(None, help="Parameter of the pilot study, e.g. r or "
+                                     "max_rate."),
+    comparisons: int = typer.Option(1, help="How many comparisons the study makes (Holm)."),
+    alpha: float = typer.Option(0.05),
+    target: float = typer.Option(0.8, help="Power wanted."),
+    n_max: int = typer.Option(20, help="Largest number of replicates to consider."),
+    n: int | None = typer.Option(None, help="Also report the smallest difference this many "
+                                 "replicates per condition can detect."),
+) -> None:
+    """How many replicates per condition a study needs to detect a difference."""
+    from fungus_cv.analyze import power as power_mod
+
+    reference_mean = math.nan
+    source = "given"
+    try:
+        if study_file is not None:
+            if not param:
+                raise ValueError("--study needs --param")
+            pilot = power_mod.spread_from_study(study_file, param)
+            sd_a_value, sd_b_value = pilot.sd_a, pilot.sd_b
+            reference_mean = pilot.mean_a
+            source = (f"pilot {study_file.name}: {pilot.condition_a} SD {pilot.sd_a:.4g} "
+                      f"(n={pilot.n_a}), {pilot.condition_b} SD {pilot.sd_b:.4g} "
+                      f"(n={pilot.n_b}); observed difference "
+                      f"{pilot.mean_b - pilot.mean_a:+.4g}")
+        elif sd is not None:
+            sd_a_value, sd_b_value = sd, sd_b if sd_b is not None else sd
+        else:
+            raise ValueError("give --sd, or a pilot study with --study and --param")
+        text = effect.strip()
+        if text.endswith("%"):
+            if math.isnan(reference_mean):
+                raise ValueError("a percentage needs --study (to know the reference mean)")
+            difference = abs(float(text[:-1]) / 100 * reference_mean)
+        else:
+            difference = abs(float(text))
+        result = power_mod.power_table(difference, sd_a_value, sd_b_value, alpha, comparisons,
+                                       target, n_max)
+    except (ValueError, FileNotFoundError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"Detecting a difference of {difference:.4g} (SDs {sd_a_value:.4g} and "
+               f"{sd_b_value:.4g}; {source}), Welch test, alpha {alpha}"
+               + (f" over {comparisons} comparisons" if comparisons > 1 else "") + ":")
+    for row in result.rows:
+        bar = "#" * round(row.power * 30)
+        mark = "  <- enough" if row.n == result.needed else ""
+        typer.echo(f"  {row.n:3d} per condition: power {row.power:5.2f}  {bar}{mark}")
+    if result.needed:
+        typer.secho(f"{result.needed} replicates per condition give {target:.0%} power.",
+                    fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"Even {n_max} replicates per condition don't reach {target:.0%} power: "
+                    "reduce the spread between replicates, or aim for a larger difference.",
+                    fg=typer.colors.YELLOW)
+    if n is not None:
+        smallest = power_mod.detectable_effect(n, sd_a_value, sd_b_value, alpha, comparisons,
+                                               target)
+        typer.echo(f"With {n} per condition, the smallest difference found {target:.0%} of the "
+                   f"time is {smallest:.4g}"
+                   + (f" ({100 * smallest / abs(reference_mean):.0f}% of the reference mean)"
+                      if reference_mean == reference_mean and reference_mean else "") + ".")
+
+
 @app.command("validate-suite")
 def validate_suite_cmd(
     suite: Path = typer.Argument(..., help="Suite YAML listing experiments, hand labels, models "

@@ -609,13 +609,21 @@ def report(
                                   "(0 = off)."),
     errors: str = typer.Option("auto", help="Frame errors: auto (choose by AICc) | iid "
                                "(independent) | ar1 (correlated between neighbouring frames)."),
+    time_to: list[float] = typer.Option([], help="Also report when the fitted curve reaches "
+                                        "this value (repeatable), e.g. --time-to 20."),
     figure_format: list[str] = typer.Option([], "--format", help="Figure format(s): png "
                                             "(default), pdf, svg. Repeatable; pdf and svg are "
                                             "vector, for papers."),
     dpi: int = typer.Option(150, help="Resolution of the png figures."),
 ) -> None:
     """Fit growth models and write plots to results/report/ (one folder per field plot)."""
-    from fungus_cv.analyze.fit import DEFAULT_MODELS, MODELS, best_fit, format_params
+    from fungus_cv.analyze.fit import (
+        DEFAULT_MODELS,
+        MODELS,
+        best_fit,
+        format_derived,
+        format_params,
+    )
     from fungus_cv.analyze.report import (
         DEFAULT_EXCLUDE,
         DEFAULT_FORMATS,
@@ -650,7 +658,7 @@ def report(
             exp, metric=metric, t0=t0, time_unit=time_unit, results_dir=results_dir,
             exclude_flags=() if include_flagged else DEFAULT_EXCLUDE, video=video,
             exclude_jumps=exclude_jumps, plot=name, models=tuple(model) or DEFAULT_MODELS,
-            formats=tuple(figure_format) or DEFAULT_FORMATS, dpi=dpi,
+            formats=tuple(figure_format) or DEFAULT_FORMATS, dpi=dpi, time_to=tuple(time_to),
             bootstrap=bootstrap, errors=errors,
         ) for name in plots]
     except (FileNotFoundError, ValueError) as exc:
@@ -675,6 +683,9 @@ def report(
             chi2 = f"  χ²/dof={fit.reduced_chi2:.2f}" if fit.weighted else ""
             chi2 += f"  AR(1) φ={fit.ar1_phi:.2f}" if fit.error_model == "ar1" else ""
             typer.echo(f"  {fit.model:9s} {format_params(fit)}")
+            derived = format_derived(fit)
+            if derived:
+                typer.echo(f"  {'':9s} {derived}")
             typer.echo(f"  {'':9s} R²={fit.r2:.4f}  AICc={fit.aicc:.1f}  "
                        f"weight={fit.akaike_weight:.2f}{chi2}  DW={fit.durbin_watson:.2f}{best}")
             for warning in fit.warnings:

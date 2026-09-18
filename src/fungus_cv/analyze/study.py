@@ -30,7 +30,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from scipy import stats
 
-from fungus_cv.analyze.fit import MODELS, FitResult, fit_all, json_safe
+from fungus_cv.analyze.fit import DERIVED, MODELS, FitResult, fit_all, json_safe, parse_level
 from fungus_cv.analyze.pipeline import RESULTS_DIR
 from fungus_cv.analyze.report import (
     DEFAULT_EXCLUDE,
@@ -89,10 +89,12 @@ class Study(BaseModel):
         for name in [self.model, *self.also_fit]:
             if name not in MODELS:
                 raise ValueError(f"unknown model {name!r}; choose from {list(MODELS)}")
-        wrong = [p for p in self.params or [] if p not in MODELS[self.model].params]
+        own = MODELS[self.model].params
+        wrong = [p for p in self.params or []
+                 if p not in own and p not in DERIVED and parse_level(p) is None]
         if wrong:
-            raise ValueError(f"{self.model} has no parameter(s) {wrong}; it has "
-                             f"{list(MODELS[self.model].params)}")
+            raise ValueError(f"{self.model} has no parameter(s) {wrong}; use its parameters "
+                             f"{list(own)}, or max_rate, t_max_rate, lag, time_to_<value>")
         if self.errors not in ("auto", "iid", "ar1"):
             raise ValueError("errors must be auto, iid or ar1")
         if self.time_unit != "auto" and self.time_unit not in TIME_UNITS:
@@ -109,6 +111,11 @@ class Study(BaseModel):
     @property
     def compared_params(self) -> list[str]:
         return list(self.params or MODELS[self.model].params)
+
+    @property
+    def levels(self) -> tuple[float, ...]:
+        """Levels asked for as ``time_to_<value>`` (when a replicate reaches that value)."""
+        return tuple(lv for p in self.compared_params if (lv := parse_level(p)) is not None)
 
 
 def load_study(path: Path) -> Study:
@@ -226,8 +233,9 @@ class Replicate:
         fit = self.fit
         if fit is None:
             return math.nan
-        if name in fit.ci95:
-            lo, hi = fit.ci95[name]
+        interval = fit.interval(name)
+        if interval:
+            lo, hi = interval
             return (hi - lo) / (2 * 1.959964)
         return fit.stderr.get(name, math.nan)
 
@@ -308,7 +316,7 @@ def run_study(study_path: Path, out_dir: Path | None = None) -> StudyResult:
         use = s.use
         rep.fits = fit_all(rep.t[use], s.y[use], models=models, sigma=s.sigma,
                            bootstrap=study.bootstrap, errors=study.errors,
-                           seed=study.seed)
+                           seed=study.seed, levels=study.levels)
         if rep.fit is None:
             message = rep.fits[0].message if rep.fits else "no fit"
             warnings.append(f"{rep.condition}/{rep.replicate}: {study.model} fit failed "
@@ -336,7 +344,8 @@ def run_study(study_path: Path, out_dir: Path | None = None) -> StudyResult:
     condition_names = list(dict.fromkeys(r.condition for r in replicates))
     conditions, comparisons = [], []
     for param in study.compared_params:
-        values = {c: [r.fit.params[param] for r in loaded if r.condition == c and r.fit]
+        values = {c: [v for r in loaded if r.condition == c and r.fit
+                      and math.isfinite(v := r.fit.value(param))]
                   for c in condition_names}
         for c in condition_names:
             reps = [r for r in loaded if r.condition == c and r.fit]
@@ -406,7 +415,10 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
 
 
 def replicate_rows(result: StudyResult) -> list[dict]:
-    params = list(MODELS[result.study.model].params)
+    own = list(MODELS[result.study.model].params)
+    # Model parameters, then the derived quantities (always), then any time_to_ asked for.
+    params = own + list(DERIVED) + [p for p in result.study.compared_params
+                                    if p not in own and p not in DERIVED]
     rows = []
     for rep in result.replicates:
         fit = rep.fit
@@ -417,9 +429,9 @@ def replicate_rows(result: StudyResult) -> list[dict]:
                "fit_ok": fit is not None,
                "error": rep.error or (rep.fits[0].message if rep.fits and not fit else "")}
         for p in params:
-            row[p] = fit.params[p] if fit else math.nan
-            row[f"{p}_se"] = fit.stderr[p] if fit else math.nan
-            ci = fit.ci95.get(p, [math.nan, math.nan]) if fit else [math.nan, math.nan]
+            row[p] = fit.value(p) if fit else math.nan
+            row[f"{p}_se"] = fit.stderr.get(p, math.nan) if fit else math.nan
+            ci = (fit.interval(p) if fit else None) or [math.nan, math.nan]
             row[f"{p}_ci_low"], row[f"{p}_ci_high"] = ci
         row.update({
             "r2": fit.r2 if fit else math.nan, "rmse": fit.rmse if fit else math.nan,
@@ -648,8 +660,10 @@ def _figures(result: StudyResult) -> list[Path]:
             reps = [r for r in loaded if r.condition == c and r.fit]
             offsets = np.linspace(-0.3, 0.0, len(reps)) if len(reps) > 1 else [-0.15]
             for off, r in zip(offsets, reps):
-                v = r.fit.params[param]
-                ci = r.fit.ci95.get(param)
+                v = r.fit.value(param)
+                if not math.isfinite(v):
+                    continue
+                ci = r.fit.interval(param)
                 yerr = None if ci is None else [[v - ci[0]], [ci[1] - v]]
                 ax.errorbar(i + off, v, yerr=yerr, fmt="o", ms=4, color=colors[c],
                             ecolor=matplotlib.colors.to_rgba(colors[c], 0.45), elinewidth=1.5,

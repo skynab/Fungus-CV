@@ -191,3 +191,101 @@ def test_report_cli_models_and_bootstrap(experiment):
     assert "50 refits" in result.output and "AICc=" in result.output
     bad = runner.invoke(app, ["report", str(experiment.root), "--model", "cubic"])
     assert bad.exit_code == 1 and "unknown model" in bad.output
+
+
+# --- derived quantities and bands ----------------------------------------------------------
+
+
+def test_derived_quantities_match_the_true_curve():
+    from fungus_cv.analyze.fit import derived_quantities
+
+    d = derived_quantities("logistic", TRUE.values(), 0, 20, levels=(20, 40, 500))
+    assert d["max_rate"] == pytest.approx(80 * 0.6 / 4, rel=0.01)
+    assert d["t_max_rate"] == pytest.approx(9, abs=0.1)
+    # Tangent at the steepest point meets the level at the first time: close to t_mid - 2/r.
+    assert d["lag"] == pytest.approx(9 - 2 / 0.6, abs=0.1)
+    assert d["time_to_40"] == pytest.approx(9, abs=0.05)  # K/2 is reached at t_mid
+    assert math.isnan(d["time_to_500"])  # never reached: no extrapolation
+    linear = derived_quantities("linear", (1.0, 2.0), 0, 10, levels=(11,))
+    assert linear["max_rate"] == pytest.approx(2) and math.isnan(linear["lag"])
+    assert linear["time_to_11"] == pytest.approx(5, abs=0.03)
+
+
+def test_fit_reports_derived_quantities_with_intervals_and_a_band():
+    from fungus_cv.analyze.fit import format_derived
+
+    fit = fit_model("logistic", T, logistic_data(), bootstrap=200, errors="iid", levels=(20,))
+    lo, hi = fit.derived_ci95["max_rate"]
+    assert lo < 12 < hi and lo < fit.derived["max_rate"] < hi
+    lo, hi = fit.derived_ci95["time_to_20"]
+    true_t20 = 9 - math.log(3) / 0.6  # 80 / (1 + e^-r(t - 9)) = 20
+    assert lo < true_t20 < hi
+    assert fit.value("max_rate") == fit.derived["max_rate"] and fit.value("K") == fit.params["K"]
+    assert fit.interval("K") == fit.ci95["K"]
+    assert "max rate" in format_derived(fit) and "time to 20" in format_derived(fit)
+
+    grid = np.linspace(0, 20, 50)
+    band_lo, band_hi = fit.band(grid)
+    assert np.all(band_lo <= band_hi)
+    assert fit_model("logistic", T, logistic_data()).band(grid) is None  # no bootstrap
+
+    import json
+    json.dumps(fit.to_dict(), allow_nan=False)  # derived values go to fits.json
+
+
+def test_study_compares_derived_quantities(tmp_path):
+    from fungus_cv.analyze.study import load_study, run_study
+
+    from .test_study import fake_experiment, write_study
+
+    for i in range(1, 4):
+        fake_experiment(tmp_path, f"control{i}", 70, 0.20, 24 + i * 0.3, seed=i)
+        fake_experiment(tmp_path, f"treated{i}", 70, 0.40, 24 + i * 0.3, seed=10 + i)
+    path = write_study(tmp_path, params=["max_rate", "time_to_35", "lag"], bootstrap=60)
+    assert load_study(path).levels == (35.0,)
+    result = run_study(path)
+    by = {(c["condition"], c["param"]): c for c in result.conditions}
+    # max rate = K r / 4: 3.5 vs 7.0 per hour.
+    assert by[("control", "max_rate")]["mean"] == pytest.approx(3.5, rel=0.1)
+    assert by[("treated", "max_rate")]["mean"] == pytest.approx(7.0, rel=0.1)
+    comp = {c["param"]: c for c in result.comparisons}
+    assert comp["max_rate"]["p"] < 0.01
+    # Both reach half their plateau at t_mid, so the time to 35 hardly differs.
+    assert abs(comp["time_to_35"]["diff"]) < 0.5
+    assert comp["lag"]["diff"] > 1  # the slower rise starts visibly earlier
+
+    with pytest.raises(ValueError, match="max_rate, t_max_rate, lag"):
+        load_study(write_study(tmp_path, params=["speed"]))
+
+
+def test_report_draws_bands_and_accepts_time_to(experiment):
+    from fungus_cv.analyze.pipeline import analyze
+    from fungus_cv.analyze.report import make_report
+    from fungus_cv.storage import Experiment
+
+    from .test_pipeline import T0, build_experiment
+
+    build_experiment(experiment, minutes=range(1, 12), bump_at=-1)
+    analyze(Experiment(experiment.root))
+    result = make_report(Experiment(experiment.root), t0=T0, bootstrap=100, time_to=(40.0,))
+    sqrt_fit = next(f for f in result.fits if f.model == "sqrt")
+    assert math.isfinite(sqrt_fit.derived["time_to_40"])
+    # k·sqrt(t) = 40 mm with k = 15 mm/sqrt(min): t = (40/15)^2 ≈ 7.1 min
+    assert sqrt_fit.derived["time_to_40"] == pytest.approx((40 / 15.0) ** 2, rel=0.05)
+    runner = CliRunner()
+    out = runner.invoke(app, ["report", str(experiment.root), "--bootstrap", "40",
+                              "--time-to", "40"])
+    assert out.exit_code == 0 and "time to 40" in out.output and "max rate" in out.output
+
+
+def test_band_coverage_over_simulated_datasets():
+    """The 95% band holds the true curve ~91-94% of the time with independent frame errors
+    (80 simulated datasets, 60 frames; ~83-88% with AR(1) 0.5), measured, not assumed."""
+    points = np.array([3.0, 9.0, 15.0])
+    truth = MODELS["logistic"].func(points, *TRUE.values())
+    covered = np.zeros(3)
+    for seed in range(40):
+        fit = fit_model("logistic", T, logistic_data(seed=seed), bootstrap=120, seed=seed)
+        lo, hi = fit.band(points)
+        covered += (lo <= truth) & (truth <= hi)
+    assert np.all(covered / 40 >= 0.8)

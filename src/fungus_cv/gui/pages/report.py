@@ -165,12 +165,14 @@ class ReportPage(QWidget):
         self.message.setText(f"{result.n_used} frames used, {result.n_excluded} excluded, "
                              f"{result.retreats} retreat(s), {result.jumps} jump(s) — see "
                              "frame_flags.csv. Time in " + result.time_unit + ".")
-        from fungus_cv.analyze.fit import best_fit, format_params
+        from fungus_cv.analyze.fit import best_fit, format_derived, format_params
 
         best = best_fit(result.fits)
         self.fits.setRowCount(len(result.fits))
         for i, fit in enumerate(result.fits):
             params = "failed: " + fit.message if not fit.ok else format_params(fit)
+            if fit.ok and format_derived(fit):
+                params += "\n" + format_derived(fit)
             if fit.warnings:
                 params += "\n⚠ " + "\n⚠ ".join(fit.warnings)
             cells = [fit.model, params, f"{fit.r2:.4f}" if fit.ok else "",

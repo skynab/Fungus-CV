@@ -289,6 +289,7 @@ def make_report(
     errors: str = "auto",
     seed: int = 0,
     results_dir: Path | None = None,
+    time_to: tuple[float, ...] = (),
 ) -> ReportResult:
     import matplotlib
 
@@ -304,7 +305,7 @@ def make_report(
     t0_ts = series.t0_ts
     sigma = series.sigma
     fits = fit_all(t[use], y[use], models=models, sigma=sigma, bootstrap=bootstrap,
-                   errors=errors, seed=seed)
+                   errors=errors, seed=seed, levels=time_to)
 
     out_dir = (Path(results_dir) if results_dir else experiment.root / RESULTS_DIR) / "report"
     if plots != ["main"]:
@@ -365,7 +366,13 @@ def make_report(
 
     if use.sum() > 1:
         grid = np.linspace(max(0.0, t[use].min()), t[use].max(), 300)
+        best_model = best_fit(fits)
         for i, (color, fit) in enumerate(zip(SERIES, fits)):
+            if fit is best_model:
+                band = fit.band(grid)
+                if band is not None:  # the best model's 95% band, from the bootstrap
+                    ax.fill_between(grid, *band, color=color, alpha=0.18, lw=0, zorder=1.5,
+                                    label=f"{fit.model} 95% band")
             if fit.ok:
                 # Later models are dashed and drawn on top, so identical fits stay visible.
                 ax.plot(grid, fit.predict(grid), color=color, lw=2,
@@ -407,6 +414,10 @@ def make_report(
             _style(ax)
         top.plot(t[use], y[use], "o", ms=4, color=INK_2, label="measured", zorder=3)
         grid = np.linspace(max(0.0, t[use].min()), t[use].max(), 300)
+        band = best.band(grid)
+        if band is not None:
+            top.fill_between(grid, *band, color=SERIES[0], alpha=0.18, lw=0,
+                             label="95% band (bootstrap)")
         top.plot(grid, best.predict(grid), color=SERIES[0], lw=2,
                  label=f"{best.model}: {best.formula}")
         top.set_ylabel(label, color=INK)

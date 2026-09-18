@@ -130,6 +130,14 @@ For each model it reports:
   - **Durbin–Watson:** about 2 means residuals are independent. Well below 1 means streaks, usually a model that doesn't fit.
   - Plain-language warnings for either problem.
 
+**Numbers read off the fitted curve**, each with a 95% interval from the same bootstrap refits:
+
+- `max_rate`: the steepest rise (e.g. mm per hour), and `t_max_rate`, when it happens.
+- `lag` (growth curves: logistic, Gompertz, Richards, sqrt_lag): where the tangent at the steepest point meets the level at the first frame, the usual definition of a lag phase.
+- `time_to_<value>`: when the curve first reaches a value, with `--time-to 20` (repeatable), e.g. when dye reaches 20 mm. It is left empty if the curve doesn't get there within the data, rather than extrapolated.
+- The main chart shades the best model's **95% band**. In simulation it held the true curve 91–94% of the time with independent frame errors, and 83–88% with strongly correlated ones (60 frames).
+- Studies can compare these too: `params: [max_rate, lag, time_to_20]` in `study.yaml`.
+
 **How well the intervals work.** On 150 simulated logistic time-lapses of 60 frames, 95% intervals for `t_mid` contained the true value this often:
 
 | Frame errors | Treating frames as independent | `--errors auto` |

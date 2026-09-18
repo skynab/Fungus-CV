@@ -71,6 +71,10 @@ MODELS = {
                       bounds=([-np.inf, -np.inf, -np.inf, 1e-3], [np.inf, np.inf, np.inf, 50])),
 }
 DEFAULT_MODELS = ("linear", "sqrt", "power", "logistic")
+# Growth curves with a lag phase and a steepest point, where "lag" means something.
+SIGMOID_MODELS = ("logistic", "gompertz", "richards", "sqrt_lag")
+DERIVED = ("max_rate", "t_max_rate", "lag")  # plus time_to_<level>, see derived_quantities()
+GRID_POINTS = 400
 
 
 @dataclass
@@ -97,6 +101,11 @@ class FitResult:
     ar1_phi: float = 0.0  # correlation between frames one typical interval apart
     ci95: dict[str, list[float]] = field(default_factory=dict)  # bootstrap percentiles
     bootstrap: dict = field(default_factory=dict)  # n, n_ok, method, seed
+    t_range: list[float] = field(default_factory=list)  # first and last time fitted
+    # Quantities read off the fitted curve (max_rate, t_max_rate, lag, time_to_<level>), with
+    # bootstrap intervals from the same refits as the parameters.
+    derived: dict[str, float] = field(default_factory=dict)
+    derived_ci95: dict[str, list[float]] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     message: str = ""
     note: str = ""
@@ -106,6 +115,27 @@ class FitResult:
 
     def predict(self, t: np.ndarray) -> np.ndarray:
         return MODELS[self.model].func(np.asarray(t, float), *self.params.values())
+
+    def band(self, t: np.ndarray, level: float = 95.0) -> tuple[np.ndarray, np.ndarray] | None:
+        """Pointwise confidence band of the fitted curve from the bootstrap refits."""
+        samples = getattr(self, "_samples", None)
+        if samples is None or len(samples) < 20:
+            return None
+        func = MODELS[self.model].func
+        with np.errstate(all="ignore"):
+            curves = np.array([func(np.asarray(t, float), *p) for p in samples])
+        tail = (100 - level) / 2
+        lo, hi = np.nanpercentile(curves, [tail, 100 - tail], axis=0)
+        return lo, hi
+
+    def value(self, name: str) -> float:
+        """A parameter or a derived quantity, by name."""
+        if name in self.params:
+            return self.params[name]
+        return self.derived.get(name, math.nan)
+
+    def interval(self, name: str) -> list[float] | None:
+        return self.ci95.get(name) or self.derived_ci95.get(name)
 
 
 def json_safe(value):
@@ -147,6 +177,56 @@ def _initial_guess(name: str, t: np.ndarray, y: np.ndarray) -> list[float]:
         lam = float(t[i] - y[i] / mu) if len(slopes) else float(t.min())
         return [A, mu, lam]
     raise KeyError(name)
+
+
+def level_name(level: float) -> str:
+    return f"time_to_{level:g}"
+
+
+def parse_level(name: str) -> float | None:
+    """``time_to_20`` -> 20.0; anything else -> None."""
+    if not name.startswith("time_to_"):
+        return None
+    try:
+        return float(name[len("time_to_"):])
+    except ValueError:
+        return None
+
+
+def derived_quantities(model_name: str, params, t_lo: float, t_hi: float,
+                       levels=()) -> dict[str, float]:
+    """Read useful numbers off a fitted curve, within the fitted time range.
+
+    - ``max_rate``: the steepest rise (units of the metric per time unit) and ``t_max_rate``
+      when it happens;
+    - ``lag`` (growth curves only): where the tangent at the steepest point meets the starting
+      level, the usual definition of a lag phase;
+    - ``time_to_<level>``: when the curve first reaches ``level`` (NaN if it doesn't within
+      the data: no extrapolation).
+    """
+    func = MODELS[model_name].func
+    grid = np.linspace(t_lo, t_hi, GRID_POINTS)
+    with np.errstate(all="ignore"):
+        y = np.asarray(func(grid, *params), float)
+    out = {name: math.nan for name in DERIVED}
+    out.update({level_name(lv): math.nan for lv in levels})
+    if not np.all(np.isfinite(y)) or t_hi <= t_lo:
+        return out
+    slope = np.gradient(y, grid)
+    i = int(np.argmax(slope))
+    out["max_rate"] = float(slope[i])
+    out["t_max_rate"] = float(grid[i])
+    if model_name in SIGMOID_MODELS and slope[i] > 0:
+        out["lag"] = float(grid[i] - (y[i] - y[0]) / slope[i])
+    for lv in levels:
+        reached = np.flatnonzero(y >= lv)
+        if len(reached) and reached[0] > 0:
+            j = reached[0]  # interpolate between the grid points either side
+            frac = (lv - y[j - 1]) / (y[j] - y[j - 1]) if y[j] != y[j - 1] else 0.0
+            out[level_name(lv)] = float(grid[j - 1] + frac * (grid[j] - grid[j - 1]))
+        elif len(reached) and reached[0] == 0:
+            out[level_name(lv)] = float(grid[0])
+    return out
 
 
 def durbin_watson(residuals: np.ndarray) -> float:
@@ -229,7 +309,7 @@ def _covariance(sol: _Solution) -> np.ndarray:
 
 
 def fit_model(name: str, t, y, sigma=None, bootstrap: int = 0, errors: str = "auto",
-              seed: int = 0) -> FitResult:
+              seed: int = 0, levels=()) -> FitResult:
     """Least-squares fit of one model, weighted by ``sigma`` (per-point standard uncertainty).
 
     ``errors``: ``iid`` treats frames as independent; ``ar1`` models correlation between
@@ -319,6 +399,10 @@ def fit_model(name: str, t, y, sigma=None, bootstrap: int = 0, errors: str = "au
             "independent frames, so intervals may still be too narrow. Longer intervals "
             "between photos or more replicates help")
 
+    t_lo, t_hi = float(t.min()), float(t.max())
+    result.t_range = [t_lo, t_hi]
+    result.derived = derived_quantities(name, popt, t_lo, t_hi, levels)
+
     if bootstrap > 0:
         samples = _residual_bootstrap(model, t, y - residuals, sol, w, lags, bootstrap,
                                       np.random.default_rng(seed))
@@ -326,8 +410,18 @@ def fit_model(name: str, t, y, sigma=None, bootstrap: int = 0, errors: str = "au
                             "method": "AR(1) sieve bootstrap" if sol.phi > 0
                             else "residual bootstrap"}
         if len(samples) >= max(20, bootstrap // 2):
-            lo, hi = np.percentile(np.array(samples), [2.5, 97.5], axis=0)
+            array = np.array(samples)
+            result._samples = array  # for bands; not written to JSON
+            lo, hi = np.percentile(array, [2.5, 97.5], axis=0)
             result.ci95 = {q: [float(a), float(b)] for q, a, b in zip(model.params, lo, hi)}
+            per_sample = [derived_quantities(name, p, t_lo, t_hi, levels) for p in array]
+            for key in result.derived:
+                values = np.array([d[key] for d in per_sample])
+                finite = values[np.isfinite(values)]
+                # A quantity the curve often doesn't reach has no honest interval.
+                if len(finite) >= 0.8 * len(values):
+                    a, b = np.percentile(finite, [2.5, 97.5])
+                    result.derived_ci95[key] = [float(a), float(b)]
         else:
             result.warnings.append(f"only {len(samples)}/{bootstrap} bootstrap refits "
                                    "converged; no intervals")
@@ -338,7 +432,9 @@ def _residual_bootstrap(model: Model, t, fitted, sol: _Solution, w, lags, n_boot
                         rng) -> list[np.ndarray]:
     """Resample innovations, rebuild (correlated) errors, refit with the same error model."""
     n = len(t)
-    z = sol.z - sol.z.mean()
+    # Fitted residuals are smaller than the true errors (the fit used p degrees of freedom);
+    # rescaling them keeps the bootstrap intervals from being slightly too narrow.
+    z = (sol.z - sol.z.mean()) * math.sqrt(n / max(n - len(sol.params), 1))
     rho = np.minimum(sol.phi**lags, 1 - 1e-9) if sol.phi > 0 else np.zeros(n - 1)
     scale = np.sqrt(1 - rho**2)
     samples = []
@@ -358,8 +454,8 @@ def _residual_bootstrap(model: Model, t, fitted, sol: _Solution, w, lags, n_boot
 
 
 def fit_all(t, y, models=DEFAULT_MODELS, sigma=None, bootstrap: int = 0, errors: str = "auto",
-            seed: int = 0) -> list[FitResult]:
-    fits = [fit_model(name, t, y, sigma, bootstrap, errors, seed) for name in models]
+            seed: int = 0, levels=()) -> list[FitResult]:
+    fits = [fit_model(name, t, y, sigma, bootstrap, errors, seed, levels) for name in models]
     scores = [f.aicc if math.isfinite(f.aicc) else f.aic for f in fits if f.ok]
     if scores:
         best = min(scores)
@@ -380,6 +476,22 @@ def format_params(fit: FitResult) -> str:
             text += f" [{lo:.4g}, {hi:.4g}]"
         parts.append(text)
     return ", ".join(parts)
+
+
+def format_derived(fit: FitResult) -> str:
+    """``max rate 4.1 [3.8, 4.4] at t=9.0; lag 5.4 [5.1, 5.7]; time to 20: 7.9 [7.6, 8.2]``"""
+    parts = []
+    labels = {"max_rate": "max rate", "t_max_rate": "at t", "lag": "lag"}
+    for key, value in fit.derived.items():
+        if not math.isfinite(value):
+            continue
+        label = labels.get(key) or f"time to {key[len('time_to_'):]}"
+        text = f"{label} {value:.4g}"
+        if key in fit.derived_ci95:
+            lo, hi = fit.derived_ci95[key]
+            text += f" [{lo:.4g}, {hi:.4g}]"
+        parts.append(text)
+    return "; ".join(parts)
 
 
 def best_fit(fits: list[FitResult]) -> FitResult | None:

@@ -198,7 +198,9 @@ def derived_quantities(model_name: str, params, t_lo: float, t_hi: float,
     """Read useful numbers off a fitted curve, within the fitted time range.
 
     - ``max_rate``: the steepest rise (units of the metric per time unit) and ``t_max_rate``
-      when it happens;
+      when it happens. Only where that is a real, smooth peak: a straight line has one
+      constant rate (and no time), and curves like √t are infinitely steep at the start, so
+      they have no maximum rate at all (NaN) rather than one set by the grid spacing;
     - ``lag`` (growth curves only): where the tangent at the steepest point meets the starting
       level, the usual definition of a lag phase;
     - ``time_to_<level>``: when the curve first reaches ``level`` (NaN if it doesn't within
@@ -214,10 +216,17 @@ def derived_quantities(model_name: str, params, t_lo: float, t_hi: float,
         return out
     slope = np.gradient(y, grid)
     i = int(np.argmax(slope))
-    out["max_rate"] = float(slope[i])
-    out["t_max_rate"] = float(grid[i])
-    if model_name in SIGMOID_MODELS and slope[i] > 0:
-        out["lag"] = float(grid[i] - (y[i] - y[0]) / slope[i])
+    peak = slope[i]
+    if np.ptp(slope) <= 1e-3 * max(abs(peak), 1e-12):
+        out["max_rate"] = float(slope.mean())  # constant rate (a straight line)
+    elif 0 < i < len(slope) - 1 and peak > 0 and \
+            min(slope[i - 1], slope[i + 1]) >= 0.8 * peak:
+        # A smooth interior peak. A spike (the steepest point at the start, or just after
+        # a lag where √(t - t_lag) is infinitely steep) depends on the grid: not reported.
+        out["max_rate"] = float(peak)
+        out["t_max_rate"] = float(grid[i])
+        if model_name in SIGMOID_MODELS:
+            out["lag"] = float(grid[i] - (y[i] - y[0]) / peak)
     for lv in levels:
         reached = np.flatnonzero(y >= lv)
         if len(reached) and reached[0] > 0:

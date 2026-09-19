@@ -135,6 +135,43 @@ def init(
 
 
 @app.command()
+def demo(
+    folder: Path = typer.Argument(..., help="Folder to create (must not exist yet)."),
+    frames: int = typer.Option(30, help="Photos in the time-lapse."),
+    study: bool = typer.Option(False, help="Instead: replicate experiments in two conditions "
+                               "and a study file."),
+    replicates: int = typer.Option(3, help="Replicates per condition with --study."),
+) -> None:
+    """Make a realistic synthetic dye experiment to try everything without a camera."""
+    from fungus_cv import demo as demo_mod
+
+    if folder.exists() and any(folder.iterdir()):
+        typer.secho(f"{folder} already exists and is not empty", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    if study:
+        path, runs = demo_mod.dye_study(folder, replicates=replicates, frames=min(frames, 20))
+        typer.echo(f"Made {len(runs)} demo experiments in {folder} and {path.name}.")
+        typer.echo("Try:")
+        for run in runs:
+            typer.echo(f"  fungus analyze {run.root}")
+        typer.echo(f"  fungus study {path}")
+        typer.echo(f"  fungus power --study {path} --param k --effect 20%")
+        return
+    run = demo_mod.dye_experiment(folder, frames=frames)
+    typer.echo(f"Made {folder}: {frames} photos of dye wicking up a paper towel "
+               f"(truth: h = {run.k_mm_per_sqrt_min} mm·√(t − {run.lag_min} min)).")
+    typer.echo("It is annotated and scaled already. Try:")
+    for line in (f"fungus analyze {folder}",
+                 f"fungus report {folder} --model sqrt --model sqrt_lag --model power",
+                 f"fungus validate {folder} {folder / 'hand_measurements.csv'}",
+                 f"fungus validate-suite {folder / 'suite.yaml'}",
+                 f"fungus sensitivity {folder} --variant colour_wider",
+                 f"fungus health {folder}", f"fungus gui {folder}"):
+        typer.echo(f"  {line}")
+    typer.echo("demo_truth.csv holds the true height of every frame.")
+
+
+@app.command()
 def cameras(
     max_index: int = typer.Option(8, help="Probe camera indices 0..N-1."),
     backend: str = typer.Option("auto", help="auto | dshow | msmf | avfoundation | v4l2"),

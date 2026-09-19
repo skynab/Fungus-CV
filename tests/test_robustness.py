@@ -199,3 +199,18 @@ def test_annotations_patch_roundtrip(tmp_path):
     loaded = Annotations.load(tmp_path / "a.json")
     assert loaded == ann
     assert loaded.patch_mask((10, 10)).sum() > 0
+
+
+def test_blur_is_flagged_but_growth_is_not(tmp_path):
+    """Spreading dye raises the image contrast without adding edges; that must not look like
+    lost focus (the demo run below flagged a sharp frame before the fix). A frame that really
+    is out of focus must still be caught."""
+    from fungus_cv.demo import dye_experiment
+
+    run = dye_experiment(tmp_path / "demo", frames=25)
+    blurred = tmp_path / "demo" / run.files[17]
+    cv2.imwrite(str(blurred), cv2.GaussianBlur(cv2.imread(str(blurred)), (0, 0), 3))
+    exp = Experiment(tmp_path / "demo")
+    analyze(exp)
+    rows = sorted(read_measurements(exp), key=lambda r: r["timestamp_utc"])
+    assert [i for i, r in enumerate(rows) if "blurry" in r["flags"]] == [17]

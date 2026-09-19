@@ -639,3 +639,10 @@ def test_camera_selector_switches_annotations_and_results(window, qtbot, experim
     report.make()
     qtbot.waitUntil(lambda: report.result is not None, timeout=60000)
     assert report.result.files[0].parent.parent.name == "cam1"
+
+
+def test_file_menu_makes_and_opens_a_demo(window, qtbot, tmp_path):
+    window.make_demo(tmp_path / "demo")
+    qtbot.waitUntil(lambda: window.state.experiment is not None, timeout=60000)
+    assert window.state.experiment.root == tmp_path / "demo"
+    assert len(window.state.experiment.read_frames()) == 30

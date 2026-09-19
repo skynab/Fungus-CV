@@ -259,7 +259,10 @@ class Analyzer:
             self.lighting = self._build_lighting()
 
         self.ref_brightness = mean_brightness(self.raw_reference)
-        self.ref_sharpness = contrast_normalized_sharpness(self.raw_reference)
+        # Judge focus where the scene doesn't change: outside the measured region.
+        self.quality_region = None if self.align_exclude is None else ~self.align_exclude
+        self.ref_sharpness = contrast_normalized_sharpness(self.raw_reference,
+                                                           self.quality_region)
         if not with_segmenter:  # e.g. the prompt tool only needs aligned frames
             return
         measure = self.cfg.measure
@@ -546,7 +549,8 @@ class Analyzer:
         if self.ref_brightness > 0 and abs(brightness / self.ref_brightness - 1) > 0.2:
             flags.append("brightness_changed")
         if self.ref_sharpness > 0 and \
-                contrast_normalized_sharpness(image) < 0.5 * self.ref_sharpness:
+                contrast_normalized_sharpness(image, self.quality_region) < \
+                0.5 * self.ref_sharpness:
             flags.append("blurry")
         light = prepared.lighting
         if light is not None:

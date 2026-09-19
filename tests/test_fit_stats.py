@@ -208,7 +208,13 @@ def test_derived_quantities_match_the_true_curve():
     assert math.isnan(d["time_to_500"])  # never reached: no extrapolation
     linear = derived_quantities("linear", (1.0, 2.0), 0, 10, levels=(11,))
     assert linear["max_rate"] == pytest.approx(2) and math.isnan(linear["lag"])
+    assert math.isnan(linear["t_max_rate"])  # the rate is the same all along
     assert linear["time_to_11"] == pytest.approx(5, abs=0.03)
+    # sqrt(t) is infinitely steep at the start: no maximum rate, rather than a grid artefact.
+    for name, params in (("sqrt", (12.0,)), ("sqrt_lag", (12.0, 2.0)), ("power", (10.0, 0.5))):
+        d = derived_quantities(name, params, 0, 20, levels=(30,))
+        assert math.isnan(d["max_rate"]) and math.isnan(d["lag"]), name
+        assert math.isfinite(d["time_to_30"])
 
 
 def test_fit_reports_derived_quantities_with_intervals_and_a_band():

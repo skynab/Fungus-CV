@@ -344,13 +344,19 @@ def run_study(study_path: Path, out_dir: Path | None = None) -> StudyResult:
     condition_names = list(dict.fromkeys(r.condition for r in replicates))
     conditions, comparisons = [], []
     for param in study.compared_params:
-        values = {c: [v for r in loaded if r.condition == c and r.fit
-                      and math.isfinite(v := r.fit.value(param))]
-                  for c in condition_names}
+        # Replicates where this quantity exists (e.g. a curve that never reaches a level has
+        # no time_to_ value), each value kept with its own uncertainty.
+        usable = {c: [r for r in loaded if r.condition == c and r.fit
+                      and math.isfinite(r.fit.value(param))] for c in condition_names}
+        values = {c: [r.fit.value(param) for r in reps] for c, reps in usable.items()}
         for c in condition_names:
-            reps = [r for r in loaded if r.condition == c and r.fit]
             row = {"condition": c, "param": param, **describe(values[c]),
-                   **random_effects(values[c], [r.param_se(param) for r in reps])}
+                   **random_effects(values[c], [r.param_se(param) for r in usable[c]])}
+            missing = sum(1 for r in loaded if r.condition == c and r.fit) - row["n"]
+            if missing:
+                warnings.append(f"{c}: {param} could not be read off {missing} replicate(s) "
+                                "(e.g. a level never reached, or no maximum rate for this "
+                                "model)")
             if row["n"] < 2:
                 warnings.append(f"{c}: only {row['n']} usable replicate(s) for {param}; no SD "
                                 "or confidence interval")

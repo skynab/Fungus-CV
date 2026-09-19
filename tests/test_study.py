@@ -192,3 +192,14 @@ def test_cli_init_and_run(study_dir):
     assert "model selection over 6 replicates" in result.output
     bad = runner.invoke(app, ["study", str(study_dir / "nope.yaml")])
     assert bad.exit_code == 1
+
+
+def test_a_quantity_missing_for_some_replicates(study_dir):
+    """max_rate doesn't exist for a sqrt_lag curve; time_to_ a level some never reach."""
+    result = run_study(write_study(study_dir, params=["max_rate", "time_to_72"],
+                                   bootstrap=0))
+    by = {(c["condition"], c["param"]): c for c in result.conditions}
+    assert by[("control", "max_rate")]["n"] == 3  # logistic: every replicate has one
+    # Plateaus are 71-73, so only some replicates ever reach 72.
+    assert by[("control", "time_to_72")]["n"] < 3
+    assert any("could not be read off" in w for w in result.warnings)

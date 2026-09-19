@@ -6,6 +6,18 @@ Take time-lapse photos with a webcam, then measure how a spreading region (dye, 
 
 Works on Windows, macOS and Linux (Python 3.10+).
 
+## Try it without a camera
+
+```bash
+fungus demo experiments/demo            # a synthetic dye time-lapse, annotated and scaled
+fungus analyze experiments/demo
+fungus report experiments/demo --model sqrt --model sqrt_lag --model power
+fungus validate-suite experiments/demo/suite.yaml
+fungus demo experiments/demo-study --study   # replicates in two conditions + study.yaml
+```
+
+The demo is a paper towel strip wicking blue dye, h = 12 mm·√(t − 0.5 min). It is built to be realistic: the wet front fades over a few millimetres and is uneven across the strip, there is camera shake, a slow change in room light, and sensor noise. The true height of every photo is in `demo_truth.csv`, and it comes with hand measurements and a validation suite, so every command has something to work on. In the app: File → Make Demo Experiment…
+
 ## Desktop app
 
 Fungus-CV has a desktop app with a page for each step, grouped in the sidebar:

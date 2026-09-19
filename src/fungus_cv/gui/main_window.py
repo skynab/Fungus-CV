@@ -169,13 +169,16 @@ class MainWindow(QMainWindow):
         open_action.triggered.connect(self.open_experiment)
         reveal = QAction("Show Experiment Folder", self)
         reveal.triggered.connect(self.reveal_experiment)
+        demo = QAction("Make Demo Experiment…", self)
+        demo.setToolTip("A synthetic dye time-lapse to try everything without a camera.")
+        demo.triggered.connect(self.make_demo)
         archive = QAction("Archive Experiment…", self)
         archive.setToolTip("Pack settings, annotations and results into one zip with a hash "
                            "manifest, for a data repository.")
         archive.triggered.connect(self.archive_experiment)
         quit_action = QAction("Quit", self, shortcut=QKeySequence.Quit)
         quit_action.triggered.connect(self.close)
-        for action in (new_action, open_action, reveal, archive):
+        for action in (new_action, open_action, demo, reveal, archive):
             file_menu.addAction(action)
         file_menu.addSeparator()
         file_menu.addAction(quit_action)
@@ -219,6 +222,29 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as exc:
             show_error(self, "Could not open experiment",
                        f"{path}\n\n{exc}\n\nChoose a folder containing config.yaml.")
+
+    def make_demo(self, folder: Path | None = None) -> None:
+        """Create the demo experiment in the background, then open it."""
+        from fungus_cv import demo as demo_mod
+        from fungus_cv.gui.qt_util import run_task
+
+        if folder is None:
+            parent = QFileDialog.getExistingDirectory(
+                self, "Where to put the demo experiment", str(Path.home()))
+            if not parent:
+                return
+            folder = Path(parent) / "fungus-demo"
+            n = 2
+            while folder.exists():
+                folder = Path(parent) / f"fungus-demo-{n}"
+                n += 1
+        self.statusBar().showMessage("Making the demo experiment…")
+        run_task(lambda p, s: demo_mod.dye_experiment(folder).root, self._demo_ready,
+                 lambda m: show_error(self, "Could not make the demo", m))
+
+    def _demo_ready(self, root) -> None:
+        self.statusBar().showMessage("Demo ready: open Analyze and press Run.", 15000)
+        self.open_experiment(root)
 
     def archive_experiment(self, out: Path | None = None, frames: bool | None = None) -> None:
         """Bundle the open experiment; asks where to save it and whether to include photos."""

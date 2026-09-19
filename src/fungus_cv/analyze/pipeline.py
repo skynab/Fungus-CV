@@ -124,6 +124,17 @@ def frames_for_analysis(experiment: Experiment, camera: str | None = None) -> li
     frames = [r for r in rows if r["status"] == "ok" and r["camera"] == camera]
     if not frames:
         raise AnalysisError(f"no frames for camera {camera!r}")
+    # Photos deleted from frames/ (e.g. bad shots removed by hand) are skipped, so the first
+    # remaining one becomes the reference instead of the whole analysis failing.
+    missing = [r["file"] for r in frames if not (experiment.root / r["file"]).is_file()]
+    if missing:
+        gone = set(missing)
+        frames = [r for r in frames if r["file"] not in gone]
+        log.warning("skipping %d frame(s) listed in frames.csv whose image file is missing "
+                    "(first: %s)", len(missing), missing[0])
+        if not frames:
+            raise AnalysisError(f"the image files for camera {camera!r} are all missing "
+                                "from the frames folder")
     return sorted(frames, key=lambda r: r["timestamp_utc"])
 
 

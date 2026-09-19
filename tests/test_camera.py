@@ -104,3 +104,29 @@ def test_list_cameras_reports_working_indices():
     found = list_cameras(max_index=4, backend="v4l2", opener=opener)
     assert [c["index"] for c in found] == [0, 2]
     assert found[0]["width"] == 64
+
+
+def test_second_open_of_a_device_waits_until_the_first_closes(monkeypatch):
+    """Two threads opening one device at once crashes some drivers; the second must wait."""
+    import threading
+
+    import fungus_cv.capture.camera as camera_module
+
+    monkeypatch.setattr(camera_module, "DEVICE_WAIT_SECONDS", 0.2)
+    cfg = CameraConfig(backend="v4l2", index=5, warmup_frames=0, exposure="auto",
+                       white_balance="auto", focus="auto")
+    first, _ = make_camera(cfg)
+    second, _ = make_camera(cfg)
+    first.open()
+    with pytest.raises(CameraError, match="in use"):
+        second.open()
+    found = list_cameras(max_index=6, backend="v4l2", opener=lambda i, b: FakeCapture(i, b))
+    assert [c["index"] for c in found] == [0, 1, 2, 3, 4]  # the open index 5 is not probed
+
+    monkeypatch.setattr(camera_module, "DEVICE_WAIT_SECONDS", 5.0)
+    threading.Timer(0.1, first.close).start()  # e.g. a preview thread finishing its close
+    second.open()
+    assert second.is_open
+    second.close()
+    first.open()  # the lock is free again after close
+    first.close()

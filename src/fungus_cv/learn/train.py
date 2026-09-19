@@ -123,13 +123,29 @@ class PatchSampler:
         return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def _batch(sampler: PatchSampler, n: int, torch, device):
+def _packed(dataset: Dataset, item: Item) -> np.ndarray:
+    """An item's labels as one bit per class in a uint8 image, so cropping, flipping and
+    nearest-neighbour resizing in the sampler treat every class alike."""
+    labels = dataset.load_labels(item)
+    packed = np.zeros(labels.shape[:2], np.uint8)
+    for k in range(labels.shape[-1]):
+        packed |= labels[..., k].astype(np.uint8) << k
+    return packed
+
+
+def _as_layers(prob: np.ndarray) -> np.ndarray:
+    """H x W (one class) or H x W x classes -> always H x W x classes."""
+    return prob[..., None] if prob.ndim == 2 else prob
+
+
+def _batch(sampler: PatchSampler, n: int, torch, device, classes: int = 1):
     from fungus_cv.learn.unet import IMAGENET_MEAN, IMAGENET_STD
 
     imgs, msks = zip(*(sampler.sample() for _ in range(n)))
     x = np.stack([cv2.cvtColor(i, cv2.COLOR_BGR2RGB) for i in imgs]).astype(np.float32) / 255
     x = (x - np.array(IMAGENET_MEAN, np.float32)) / np.array(IMAGENET_STD, np.float32)
-    y = np.stack(msks).astype(np.float32)[:, None]
+    packed = np.stack(msks).astype(np.uint8)
+    y = np.stack([(packed >> k) & 1 for k in range(classes)], axis=1).astype(np.float32)
     return (torch.from_numpy(x.transpose(0, 3, 1, 2).copy()).to(device),
             torch.from_numpy(y).to(device))
 
@@ -139,9 +155,10 @@ def _loss(logits, target, torch):
     # Dice over the whole batch: per-patch Dice would heavily penalise tiny stray
     # probabilities on patches that contain no target at all.
     prob = torch.sigmoid(logits)
-    inter = (prob * target).sum()
-    dice = 1 - (2 * inter + 1) / (prob.sum() + target.sum() + 1)
-    return bce + dice
+    dims = (0, 2, 3)  # per class, averaged: a rare class counts as much as a common one
+    inter = (prob * target).sum(dims)
+    dice = 1 - (2 * inter + 1) / (prob.sum(dims) + target.sum(dims) + 1)
+    return bce + dice.mean()
 
 
 # --- training ------------------------------------------------------------------------------
@@ -189,6 +206,19 @@ def _seed(seed: int, torch) -> None:
     torch.manual_seed(seed)
 
 
+def _item_rows(item_id: str, prob: np.ndarray, labels: np.ndarray, classes: list[str],
+               thresholds: dict[str, float]) -> list[dict]:
+    """Metrics per class (one row for a one-class model, as before)."""
+    prob = _as_layers(prob)
+    rows = []
+    for k, name in enumerate(classes):
+        row = {"id": item_id, **mask_metrics(prob[..., k] >= thresholds[name], labels[..., k])}
+        if len(classes) > 1:
+            row["class"] = name
+        rows.append(row)
+    return rows
+
+
 def _evaluate(net, items: list[Item], dataset: Dataset, cfg: TrainConfig, device,
               threshold: float | None = 0.5) -> tuple[list[dict], list[np.ndarray]]:
     torch = import_torch()
@@ -200,8 +230,8 @@ def _evaluate(net, items: list[Item], dataset: Dataset, cfg: TrainConfig, device
                                          cfg.tile_px, cfg.overlap_px)
             probs.append(prob)
             if threshold is not None:
-                rows.append({"id": item.id, **mask_metrics(prob >= threshold,
-                                                           dataset.load_mask(item))})
+                rows += _item_rows(item.id, prob, dataset.load_labels(item), dataset.classes,
+                                   {c: threshold for c in dataset.classes})
     net.train()
     return rows, probs
 
@@ -253,13 +283,14 @@ def train(dataset: Dataset, out_dir: Path, cfg: TrainConfig, progress=None,
 
     _seed(cfg.seed, torch)
     device, _ = choose_device(cfg.device)
-    net = ResNetUNet(cfg.encoder, pretrained=cfg.pretrained).to(device)
+    classes = list(dataset.classes)
+    net = ResNetUNet(cfg.encoder, pretrained=cfg.pretrained, classes=len(classes)).to(device)
     optimizer = torch.optim.AdamW(net.parameters(), lr=cfg.learning_rate,
                                   weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=cfg.learning_rate,
                                                     total_steps=cfg.steps, pct_start=0.1)
     sampler = PatchSampler([dataset.load_image(i) for i in train_items],
-                           [dataset.load_mask(i) for i in train_items], cfg,
+                           [_packed(dataset, i) for i in train_items], cfg,
                            np.random.default_rng(cfg.seed))
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -290,7 +321,7 @@ def train(dataset: Dataset, out_dir: Path, cfg: TrainConfig, progress=None,
             raise TrainingCancelled(
                 f"training cancelled after {step - 1} of {cfg.steps} steps; no model written"
                 + (", resume it with --resume" if checkpoint_path.exists() else ""))
-        x, y = _batch(sampler, cfg.batch_size, torch, device)
+        x, y = _batch(sampler, cfg.batch_size, torch, device, len(classes))
         loss = _loss(net(x), y, torch)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -327,14 +358,21 @@ def train(dataset: Dataset, out_dir: Path, cfg: TrainConfig, progress=None,
         best_state = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
     net.load_state_dict(best_state)
 
-    threshold, val_metrics, val_rows = 0.5, {}, []
+    thresholds = {c: 0.5 for c in classes}
+    val_metrics, val_rows, per_class = {}, [], {}
     if val_items:
         _, probs = _evaluate(net, val_items, dataset, cfg, device, threshold=None)
-        truths = [dataset.load_mask(i) for i in val_items]
-        threshold, _ = tune_threshold(probs, truths)
-        val_rows = [{"id": i.id, **mask_metrics(p >= threshold, t)}
-                    for i, p, t in zip(val_items, probs, truths)]
+        truths = [dataset.load_labels(i) for i in val_items]
+        for k, name in enumerate(classes):  # each class gets its own tuned threshold
+            thresholds[name], _ = tune_threshold([_as_layers(p)[..., k] for p in probs],
+                                                 [t[..., k] for t in truths])
+        for item, p, t in zip(val_items, probs, truths):
+            val_rows += _item_rows(item.id, p, t, classes, thresholds)
         val_metrics = summarize(val_rows)
+        if len(classes) > 1:
+            per_class = {c: summarize([r for r in val_rows if r["class"] == c])
+                         for c in classes}
+    threshold = thresholds[classes[0]]
 
     torch.save(best_state, out_dir / WEIGHTS_NAME)
     seconds = time.time() - started
@@ -344,6 +382,8 @@ def train(dataset: Dataset, out_dir: Path, cfg: TrainConfig, progress=None,
         "architecture": {"name": "ResNetUNet", "encoder": cfg.encoder,
                          "input": "BGR->RGB, ImageNet normalisation"},
         "threshold": threshold,
+        "classes": classes,
+        "thresholds": thresholds,
         "dataset": {
             "name": dataset.name, "path": str(dataset.root.resolve()),
             "fingerprint": dataset.fingerprint(items),
@@ -351,7 +391,7 @@ def train(dataset: Dataset, out_dir: Path, cfg: TrainConfig, progress=None,
             "val_items": [i.id for i in val_items],
             "split": split,
         },
-        "validation": {"summary": val_metrics, "per_item": val_rows,
+        "validation": {"summary": val_metrics, "per_class": per_class, "per_item": val_rows,
                        "note": "metrics use the tuned threshold; validation data also picked "
                                "the best checkpoint, so confirm on separate data with "
                                "`fungus evaluate`"},
@@ -381,12 +421,35 @@ def evaluate_model(model_dir: Path, dataset: Dataset, reviewed_only: bool = True
     tile = loaded.card["training"]["config"].get("tile_px", 512)
     overlap = loaded.card["training"]["config"].get("overlap_px", 64)
     trained_on = set(loaded.card["dataset"]["train_items"])
+    # Classes are matched by name, so a test set may label only some of them. A one-class
+    # model and dataset match whatever the class is called (as before).
+    if len(loaded.classes) == 1 and not dataset.multi_class:
+        pairs = [(0, dataset.classes[0], loaded.classes[0])]
+    else:
+        pairs = [(k, name, name) for k, name in enumerate(loaded.classes)
+                 if name in dataset.classes]
+        if not pairs:
+            raise ValueError(f"the model's classes {loaded.classes} are not in the dataset "
+                             f"({dataset.classes})")
     rows = []
     for item in dataset.selected(reviewed_only):
-        prob = predict_probabilities(loaded.net, dataset.load_image(item), loaded.device,
-                                     tile, overlap)
-        rows.append({"id": item.id, "group": item.group, "in_training_set": item.id in trained_on,
-                     **mask_metrics(prob >= t, dataset.load_mask(item))})
+        prob = _as_layers(predict_probabilities(loaded.net, dataset.load_image(item),
+                                                loaded.device, tile, overlap))
+        for k, data_class, model_class in pairs:
+            cut = t if threshold is not None else loaded.threshold_for(model_class)
+            row = {"id": item.id, "group": item.group,
+                   "in_training_set": item.id in trained_on,
+                   **mask_metrics(prob[..., k] >= cut, dataset.load_mask(item, data_class))}
+            if len(pairs) > 1:
+                row["class"] = model_class
+            rows.append(row)
     unseen = [r for r in rows if not r["in_training_set"]]
-    return rows, {"all": summarize(rows), "not_in_training_set": summarize(unseen),
-                  "threshold": t}
+    summary = {"all": summarize(rows), "not_in_training_set": summarize(unseen),
+               "threshold": t}
+    if len(pairs) > 1:
+        summary["per_class"] = {
+            name: {"all": summarize([r for r in rows if r["class"] == name]),
+                   "not_in_training_set": summarize([r for r in unseen if r["class"] == name]),
+                   "threshold": loaded.threshold_for(name)}
+            for _, _, name in pairs}
+    return rows, summary

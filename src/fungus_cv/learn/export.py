@@ -50,13 +50,33 @@ def export_from_run(
     group: str | None = None,
     replace: bool = False,
     camera: str | None = None,
+    target_class: str | None = None,
+    reference_class: str | None = None,
 ) -> list[Item]:
     """Copy aligned frames and a run's masks into the dataset as unreviewed labels.
 
     Frames are spread evenly over the time-lapse so early (small target) and late (large
-    target) stages are both represented.
+    target) stages are both represented. With ``reference_class``, the run's reference masks
+    (e.g. the stem, when `analysis.reference` segments it) come along as that class, the
+    target's as ``target_class``: a start for a model that learns both.
     """
     run_info = resolve_run(experiment, run, camera)
+    ref_dir = run_info.masks_dir / "reference"
+    if reference_class:
+        if not ref_dir.is_dir():
+            raise ValueError(f"run {run_info.run_id} has no reference masks: segment the "
+                             "reference object (analysis.reference.method) to export it")
+        target_class = target_class or "target"
+        if dataset.classes == ["target"] and not dataset.items:
+            dataset.classes = [target_class]
+        for name in (target_class, reference_class):
+            if name not in dataset.classes:
+                dataset.add_class(name)
+    elif target_class and target_class not in dataset.classes:
+        if dataset.classes == ["target"] and not dataset.items:
+            dataset.classes = [target_class]
+        else:
+            dataset.add_class(target_class)
     analyzer = Analyzer(experiment, with_segmenter=False, camera=camera)
     frames = analyzer.frames
     stems = {p.stem for p in run_info.masks_dir.glob("*.png")}
@@ -76,9 +96,16 @@ def export_from_run(
             log.info("skipping %s (already in dataset)", item_id)
             continue
         mask = cv2.imread(str(run_info.masks_dir / f"{stem}.png"), cv2.IMREAD_GRAYSCALE) > 127
+        labels = np.zeros((*window.crop(mask).shape, len(dataset.classes)), bool)
+        labels[..., dataset.class_bit(target_class)] = window.crop(mask)
+        if reference_class:
+            ref = cv2.imread(str(ref_dir / f"{stem}.png"), cv2.IMREAD_GRAYSCALE)
+            if ref is not None:  # the target is part of the reference object (moss on stem)
+                labels[..., dataset.class_bit(reference_class)] = window.crop(
+                    (ref > 127) | mask)
         image = analyzer.aligned_frame(index)
         added.append(dataset.add(
-            window.crop(image), window.crop(mask), item_id, replace=replace,
+            window.crop(image), labels, item_id, replace=replace,
             group=group,
             source=f"{experiment.root.name}/{row['file']} (run {run_info.run_id}, "
                    f"{run_info.method})",

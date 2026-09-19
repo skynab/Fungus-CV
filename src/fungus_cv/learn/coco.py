@@ -1,9 +1,10 @@
 """Exchange labels with CVAT, Label Studio and other tools through COCO JSON.
 
-Export writes the dataset's images and one annotation per item: polygons (read by every tool,
-but holes in a mask are lost) or ``--rle`` run-length encoding (exact, and what CVAT itself
-writes for masks). Import reads either form, including compressed RLE, rasterises it and
-writes it into the dataset: an item with the same name is updated, a new image is added.
+Export writes the dataset's images and one annotation per item and class (one COCO category
+per dataset class): polygons (read by every tool, but holes in a mask are lost) or ``--rle``
+run-length encoding (exact, and what CVAT itself writes for masks). Import reads either form,
+including compressed RLE, rasterises it and writes it into the dataset: an item with the same
+name is updated, a new image is added.
 
 The run-length code follows COCO's own format (column-major counts, starting with the
 background, compressed with its 6-bit variable-length code), so no extra package is needed.
@@ -20,9 +21,6 @@ import cv2
 import numpy as np
 
 from fungus_cv.learn.dataset import Dataset, Item, safe_id
-
-CATEGORY = "target"
-
 
 # --- run-length encoding -------------------------------------------------------------------
 
@@ -119,29 +117,32 @@ def export_coco(dataset: Dataset, out_dir: Path, rle: bool = False,
     (out_dir / "images").mkdir(parents=True, exist_ok=True)
     images, annotations = [], []
     for image_id, item in enumerate(dataset.selected(reviewed_only), start=1):
-        mask = dataset.load_mask(item)
-        h, w = mask.shape
+        labels = dataset.load_labels(item)
+        h, w = labels.shape[:2]
         name = f"{item.id}.png"
         shutil.copyfile(dataset.root / item.image, out_dir / "images" / name)
         images.append({"id": image_id, "file_name": name, "width": w, "height": h,
                        "fungus_cv": {"reviewed": item.reviewed, "group": item.group,
                                      "source": item.source}})
-        if not mask.any():
-            continue
-        ys, xs = np.nonzero(mask)
-        entry = {"id": len(annotations) + 1, "image_id": image_id, "category_id": 1,
-                 "area": int(mask.sum()),
-                 "bbox": [int(xs.min()), int(ys.min()), int(np.ptp(xs)) + 1,
-                          int(np.ptp(ys)) + 1]}
-        if rle:
-            entry.update(iscrowd=1, segmentation={
-                "size": [h, w], "counts": rle_encode_string(rle_counts(mask))})
-        else:
-            entry.update(iscrowd=0, segmentation=mask_to_polygons(mask))
-        annotations.append(entry)
+        for k in range(labels.shape[-1]):  # one annotation per class present
+            mask = labels[..., k]
+            if not mask.any():
+                continue
+            ys, xs = np.nonzero(mask)
+            entry = {"id": len(annotations) + 1, "image_id": image_id, "category_id": k + 1,
+                     "area": int(mask.sum()),
+                     "bbox": [int(xs.min()), int(ys.min()), int(np.ptp(xs)) + 1,
+                              int(np.ptp(ys)) + 1]}
+            if rle:
+                entry.update(iscrowd=1, segmentation={
+                    "size": [h, w], "counts": rle_encode_string(rle_counts(mask))})
+            else:
+                entry.update(iscrowd=0, segmentation=mask_to_polygons(mask))
+            annotations.append(entry)
     coco = {"info": {"description": f"Fungus-CV dataset {dataset.name}"},
-            "categories": [{"id": 1, "name": CATEGORY}], "images": images,
-            "annotations": annotations}
+            "categories": [{"id": k + 1, "name": name}
+                           for k, name in enumerate(dataset.classes)],
+            "images": images, "annotations": annotations}
     path = out_dir / "annotations.json"
     path.write_text(json.dumps(coco, indent=1), encoding="utf-8")
     return path
@@ -160,7 +161,12 @@ class ImportResult:
 def import_coco(dataset: Dataset, coco_json: Path, images_dir: Path | None = None,
                 categories: list[str] | None = None, reviewed: bool = False,
                 group: str = "imported") -> ImportResult:
-    """Merge a COCO file's masks into the dataset (all chosen categories count as target)."""
+    """Merge a COCO file's masks into the dataset.
+
+    Categories map to the dataset's classes by name. A new, empty dataset takes the file's
+    categories as its classes. A single-class dataset without those names merges every chosen
+    category into its one class (as for a moss-only label set).
+    """
     coco = json.loads(Path(coco_json).read_text(encoding="utf-8"))
     images_dir = Path(images_dir) if images_dir else Path(coco_json).parent / "images"
     names = {c["id"]: c["name"] for c in coco.get("categories", [])}
@@ -168,6 +174,16 @@ def import_coco(dataset: Dataset, coco_json: Path, images_dir: Path | None = Non
     if categories and not wanted:
         raise ValueError(f"no categories {categories} in the file; it has "
                          f"{sorted(names.values())}")
+    chosen = [names[cid] for cid in sorted(wanted)]
+    if not dataset.items and dataset.classes == ["target"] and len(chosen) > 1:
+        dataset.classes = list(chosen)  # a new dataset takes the file's categories
+    by_name = {c: c for c in chosen if c in dataset.classes}
+    if len(by_name) < len(chosen) and not dataset.multi_class:
+        by_name = {c: dataset.classes[0] for c in chosen}  # merge into the one class
+    missing = [c for c in chosen if c not in by_name]
+    if missing:
+        raise ValueError(f"categories {missing} are not classes of this dataset "
+                         f"({dataset.classes}); add them first or choose --category")
     by_image: dict[int, list[dict]] = {}
     for ann in coco.get("annotations", []):
         if ann.get("category_id") in wanted:
@@ -176,22 +192,25 @@ def import_coco(dataset: Dataset, coco_json: Path, images_dir: Path | None = Non
     result = ImportResult()
     for image in coco.get("images", []):
         h, w = int(image["height"]), int(image["width"])
-        mask = np.zeros((h, w), bool)
+        labels = np.zeros((h, w, len(dataset.classes)), bool)
         for ann in by_image.get(image["id"], []):
+            k = dataset.classes.index(by_name[names[ann["category_id"]]])
             seg = ann.get("segmentation")
             if isinstance(seg, dict):
                 if isinstance(seg.get("counts"), list) and seg.get("size") is None:
                     seg = {**seg, "size": [h, w]}
-                mask |= mask_from_rle(seg)
+                labels[..., k] |= mask_from_rle(seg)
             elif isinstance(seg, list) and seg:
-                mask |= mask_from_polygons(seg, h, w)
+                labels[..., k] |= mask_from_polygons(seg, h, w)
         file_name = Path(image["file_name"]).name
         item = dataset.get(safe_id(Path(file_name).stem))
+        imported = {by_name[c] for c in chosen}
         if item is not None:
-            if dataset.load_mask(item).shape != mask.shape:
+            if dataset.load_mask(item).shape != (h, w):
                 result.skipped.append(f"{file_name}: size differs from the dataset's image")
                 continue
-            dataset.write_mask(item, mask)
+            for name in imported:  # only the imported classes change
+                dataset.write_mask(item, labels[..., dataset.classes.index(name)], name)
             item.reviewed = item.reviewed or reviewed
             result.updated.append(item)
             continue
@@ -206,7 +225,7 @@ def import_coco(dataset: Dataset, coco_json: Path, images_dir: Path | None = Non
             result.skipped.append(f"{file_name}: image is {picture.shape[1]}x"
                                   f"{picture.shape[0]}, the file says {w}x{h}")
             continue
-        result.added.append(dataset.add(picture, mask, Path(file_name).stem, group=group,
+        result.added.append(dataset.add(picture, labels, Path(file_name).stem, group=group,
                                         source=f"COCO import from {Path(coco_json).name}",
                                         reviewed=reviewed))
     dataset.save()

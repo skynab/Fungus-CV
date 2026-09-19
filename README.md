@@ -486,6 +486,27 @@ fungus label datasets/moss-bark --unreviewed --by-priority --sam
 fungus train datasets/moss-bark models/moss-bark-v2
 ```
 
+### One model for several classes (e.g. stem and moss)
+
+```bash
+fungus dataset add-class datasets/plants moss --rename-first stem
+fungus dataset export experiments/moss-1 datasets/plants --target-class moss --reference-class stem
+fungus label datasets/plants --class moss        # keys 1-9 switch class
+fungus train datasets/plants models/plants-v1
+```
+
+- **Overlapping classes:** a dataset can have up to 8 classes, and they may overlap. A moss-covered part of the stem is both "stem" and "moss", which is exactly what the stem measurement needs.
+- **Output per class:** the model gives each class its own yes/no output with its own tuned threshold. Validation and `fungus evaluate` report every class separately.
+- **Using it in analysis:** point both the target and the reference at the same model and choose the class:
+
+  ```yaml
+  target:    {method: model, model: {path: models/plants-v1, class_name: moss}}
+  reference: {method: model, model: {path: models/plants-v1, class_name: stem}}
+  ```
+- **Starting labels:** `dataset export --reference-class` brings the run's segmented stem along as a second class.
+- **Labeling:** the editors (`fungus label`, and the Labels page with its Class selector and "Add class…") edit one class at a time and show the others faintly. COCO export/import keeps one category per class.
+- **Single-class datasets and models work exactly as before:** masks stay 0/255. Multi-class masks store one bit per class, so use COCO export to edit them in other tools.
+
 ### Correcting labels in CVAT, Label Studio or another tool
 
 ```bash

@@ -646,3 +646,30 @@ def test_file_menu_makes_and_opens_a_demo(window, qtbot, tmp_path):
     qtbot.waitUntil(lambda: window.state.experiment is not None, timeout=60000)
     assert window.state.experiment.root == tmp_path / "demo"
     assert len(window.state.experiment.read_frames()) == 30
+
+
+def test_labels_page_edits_one_class_at_a_time(window, qtbot, tmp_path):
+    from fungus_cv.learn.dataset import Dataset
+
+    ds = Dataset.create(tmp_path / "ds")
+    stem = np.zeros((80, 100), bool)
+    stem[:, 40:60] = True
+    ds.add(np.full((80, 100, 3), 120, np.uint8), stem, "p1")
+    ds.save()
+    labels = page(window, "Labels")
+    labels.open_dataset(tmp_path / "ds")
+    assert not labels.class_box.isEnabled()  # one class: nothing to choose
+    labels.add_class("moss")
+    assert labels.class_box.isEnabled() and labels.current_class == "moss"
+    assert labels.dataset.classes == ["target", "moss"]
+    assert not labels.mask.any() and labels.other is not None and labels.other.sum() == 1600
+
+    labels._stroke(50, 20, Qt.LeftButton.value, ImageView.STROKE_PRESS)
+    labels._stroke(50, 20, Qt.LeftButton.value, ImageView.STROKE_RELEASE)
+    labels.class_box.setCurrentText("target")  # switching keeps the moss edit
+    assert labels.mask.sum() == 1600
+    labels.save_item()
+    saved = Dataset.open(tmp_path / "ds")
+    item = saved.get("p1")
+    assert saved.load_mask(item, "moss")[20, 50] and saved.load_mask(item, "target").sum() == 1600
+    assert item.reviewed

@@ -38,6 +38,7 @@ class TrainedModelSegmenter:
     tile_px: int = 512
     overlap_px: int = 64
     min_blob_area_px: int = 0
+    class_name: str | None = None  # which class of a multi-class model (None = the first)
     variant_probability_delta: float | None = None  # for segmentation uncertainty
     name: str = field(default="model", init=False)
 
@@ -52,6 +53,7 @@ class TrainedModelSegmenter:
             tile_px=cfg.tile_px,
             overlap_px=cfg.overlap_px,
             min_blob_area_px=cfg.min_blob_area_px,
+            class_name=cfg.class_name,
         )
 
     def _loaded(self):
@@ -75,7 +77,11 @@ class TrainedModelSegmenter:
                   else CropWindow.full(w, h))
         prob = predict_probabilities(loaded.net, window.crop(image), loaded.device,
                                      self.tile_px, self.overlap_px)
-        t = self.threshold if self.threshold is not None else loaded.threshold
+        k = loaded.class_index(self.class_name)
+        if prob.ndim == 3:
+            prob = prob[..., k]
+        t = self.threshold if self.threshold is not None else \
+            loaded.threshold_for(self.class_name)
         thresholds = [t]
         if with_variants:
             thresholds += threshold_variants(t, self.variant_probability_delta)
@@ -103,7 +109,9 @@ class TrainedModelSegmenter:
             "model_dir": str(self.model_dir),
             "weights_sha256": loaded.weights_sha256,
             "dataset_fingerprint": loaded.card["dataset"]["fingerprint"],
-            "threshold": self.threshold if self.threshold is not None else loaded.threshold,
+            "threshold": self.threshold if self.threshold is not None
+            else loaded.threshold_for(self.class_name),
+            "class": loaded.classes[loaded.class_index(self.class_name)],
             "crop": {"roi_margin_px": self.crop_margin_px} if self.roi else None,
             "tile_px": self.tile_px,
             "overlap_px": self.overlap_px,

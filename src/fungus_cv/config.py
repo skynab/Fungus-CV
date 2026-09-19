@@ -166,6 +166,7 @@ class ModelTargetConfig(BaseModel):
     crop_to_roi: bool = True
     crop_margin_px: int = Field(32, ge=0)
     threshold: float | None = Field(None, gt=0, lt=1)  # None = value tuned during training
+    class_name: str | None = None  # multi-class model: which class; None = its first class
     tile_px: int = Field(512, ge=64)
     overlap_px: int = Field(64, ge=0)
     min_blob_area_px: int = Field(0, ge=0)
@@ -377,6 +378,7 @@ analysis:
       crop_to_roi: true
       crop_margin_px: 32
       threshold: null     # null = threshold tuned on validation data during training
+      class_name: null    # a model with several classes (e.g. stem, moss): which one
       tile_px: 512        # large frames are processed in overlapping tiles
       overlap_px: 64
       min_blob_area_px: 0
@@ -403,6 +405,7 @@ analysis:
       crop_to_roi: true
       crop_margin_px: 32
       threshold: null
+      class_name: null    # e.g. stem, from the same model as the target's moss
       tile_px: 512
       overlap_px: 64
       min_blob_area_px: 0

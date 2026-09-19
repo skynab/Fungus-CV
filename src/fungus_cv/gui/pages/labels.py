@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -129,6 +130,13 @@ class LabelsPage(QWidget):
         self.order = QComboBox()
         self.order.addItems(["Most useful first", "Dataset order"])
         self.order.currentTextChanged.connect(lambda _: self.refresh_items())
+        self.class_box = QComboBox()
+        self.class_box.setToolTip("Which class the brush and SAM edit; the others show faintly")
+        self.class_box.currentTextChanged.connect(self._class_changed)
+        self.add_class_btn = QPushButton("Add class…")
+        self.add_class_btn.clicked.connect(self._ask_class)
+        self.other = None  # the classes not being edited, drawn faintly
+        self._editing: str | None = None  # the class self.mask belongs to
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["Item", "Group", "Reviewed", "Priority"])
         header = self.table.horizontalHeader()
@@ -216,6 +224,11 @@ class LabelsPage(QWidget):
         ll.addWidget(self.add_btn)
         ll.addWidget(self.rank_btn)
         row = QHBoxLayout()
+        row.addWidget(QLabel("Class:"))
+        row.addWidget(self.class_box, 1)
+        row.addWidget(self.add_class_btn)
+        ll.addLayout(row)
+        row = QHBoxLayout()
         row.addWidget(self.unreviewed_only)
         row.addWidget(self.order, 1)
         ll.addLayout(row)
@@ -272,6 +285,7 @@ class LabelsPage(QWidget):
             return
         self.state.settings.setValue("last_dataset", str(Path(path).resolve()))
         self.index = -1
+        self._fill_classes()
         self.refresh_items()
         if self.items:
             self.select(0)
@@ -339,7 +353,8 @@ class LabelsPage(QWidget):
         self.index = index
         item = self.items[index]
         self.image = self.dataset.load_image(item)
-        self.mask = self.dataset.load_mask(item)
+        self._editing = self.current_class
+        self._load_class_masks(item)
         self.undo_stack, self.dirty = [], False
         self.clear_clicks()
         self.view.set_image(self.image)
@@ -373,7 +388,7 @@ class LabelsPage(QWidget):
         if self.dataset is None or self.mask is None or not 0 <= self.index < len(self.items):
             return
         item, position = self.items[self.index], self.index
-        self.dataset.write_mask(item, self.mask)
+        self.dataset.write_mask(item, self.mask, self.current_class)
         item.reviewed = True
         self.dataset.save()
         self.dirty = False
@@ -422,8 +437,64 @@ class LabelsPage(QWidget):
             self._show_info()
 
     def _draw_mask(self) -> None:
-        self.view.set_mask(self.mask if self.show_mask.isChecked() else None)
+        show = self.show_mask.isChecked()
+        self.view.set_mask(self.other if show else None, color=(0, 220, 255), alpha=60,
+                           layer=-1)
+        self.view.set_mask(self.mask if show else None)
         self.view.set_mask(self.proposal, color=(255, 220, 0), alpha=120, layer=1)
+
+    # --- classes ---------------------------------------------------------------------------
+
+    @property
+    def current_class(self) -> str | None:
+        return self.class_box.currentText() or None
+
+    def _fill_classes(self) -> None:
+        self.class_box.blockSignals(True)
+        self.class_box.clear()
+        if self.dataset is not None:
+            self.class_box.addItems(self.dataset.classes)
+        self.class_box.blockSignals(False)
+        self.class_box.setEnabled(self.dataset is not None and self.dataset.multi_class)
+
+    def _load_class_masks(self, item) -> None:
+        self.mask = self.dataset.load_mask(item, self.current_class)
+        self.other = None
+        if self.dataset.multi_class:
+            labels = self.dataset.load_labels(item)
+            rest = np.delete(labels, self.dataset.class_bit(self.current_class), axis=-1)
+            self.other = rest.any(axis=-1) if rest.size else None
+
+    def _class_changed(self, name: str) -> None:
+        if not name or self.dataset is None or not 0 <= self.index < len(self.items):
+            return
+        item = self.items[self.index]
+        if self.dirty and self._editing is not None:  # keep edits to the previous class
+            self.dataset.write_mask(item, self.mask, self._editing)
+        self._editing = name
+        self._load_class_masks(item)
+        self.undo_stack, self.dirty = [], False
+        self.clear_clicks()
+        self._show_info()
+
+    def _ask_class(self) -> None:
+        name, ok = QInputDialog.getText(self, "Add class", "Name of the new class (e.g. stem):")
+        if ok:
+            self.add_class(name)
+
+    def add_class(self, name: str) -> None:
+        if self.dataset is None:
+            return
+        self._leave_item()
+        try:
+            self.dataset.add_class(name)
+        except ValueError as exc:
+            self._error(str(exc))
+            return
+        self._fill_classes()
+        self.class_box.setCurrentText(name.strip())
+        self.message.setText(f"Classes: {', '.join(self.dataset.classes)}. Label "
+                             f"{name.strip()} on each image and save.")
 
     # --- SAM clicks ------------------------------------------------------------------------
 

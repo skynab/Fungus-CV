@@ -1504,6 +1504,10 @@ def dataset_export(
     group: str | None = typer.Option(None, help="Group name (default: experiment name). "
                                      "Validation never mixes groups with training."),
     camera: str | None = typer.Option(None, help="Which camera's run to export from."),
+    target_class: str | None = typer.Option(None, help="Class for the run's target masks "
+                                            "(default: the dataset's first class)."),
+    reference_class: str | None = typer.Option(None, help="Also export the run's reference "
+                                               "masks (e.g. the stem) as this class."),
 ) -> None:
     """Copy frames and their masks into a dataset, to be corrected with `fungus label`."""
     from fungus_cv.analyze.compare import list_runs
@@ -1523,7 +1527,8 @@ def dataset_export(
     ds = Dataset.open_or_create(dataset)
     try:
         added = export_from_run(exp, ds, run, count=count, crop_to_roi=not full_frame,
-                                group=group, camera=camera)
+                                group=group, camera=camera, target_class=target_class,
+                                reference_class=reference_class)
     except (AnalysisError, ValueError, FileNotFoundError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
@@ -1602,6 +1607,31 @@ def dataset_import_coco(
         typer.secho(f"skipped {message}", fg=typer.colors.YELLOW)
 
 
+@dataset_app.command("add-class")
+def dataset_add_class(
+    dataset: Path = typer.Argument(..., help="Dataset folder."),
+    name: str = typer.Argument(..., help="New class, e.g. stem or moss."),
+    rename_first: str | None = typer.Option(None, help="Also give the existing first class "
+                                            "(target) a proper name."),
+) -> None:
+    """Add a class, so one model learns several things (they may overlap: moss on a stem)."""
+    from fungus_cv.learn.dataset import Dataset
+
+    try:
+        ds = Dataset.open(dataset)
+        if rename_first:
+            if rename_first in ds.classes:
+                raise ValueError(f"class {rename_first!r} already exists")
+            ds.classes[0] = rename_first
+            ds.save()
+        ds.add_class(name)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"{ds.name} now has classes {', '.join(ds.classes)}. Label the new class with "
+               f"`fungus label {dataset} --class {name}`.")
+
+
 @dataset_app.command("info")
 def dataset_info(dataset: Path = typer.Argument(..., help="Dataset folder.")) -> None:
     """Show items per group and how many are reviewed."""
@@ -1614,7 +1644,8 @@ def dataset_info(dataset: Path = typer.Argument(..., help="Dataset folder.")) ->
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
     typer.echo(f"{ds.name}: {len(ds.items)} item(s), "
-               f"{sum(i.reviewed for i in ds.items)} reviewed")
+               f"{sum(i.reviewed for i in ds.items)} reviewed; classes: "
+               f"{', '.join(ds.classes)}")
     for group, st in sorted(dataset_stats(ds).items()):
         typer.echo(f"  {group or '(no group)'}: {st['items']} items, {st['reviewed']} reviewed, "
                    f"target covers {st['mean_target_pct']}% on average")
@@ -1702,6 +1733,8 @@ def label(
                              "extra)."),
     sam_model: str = typer.Option("facebook/sam2.1-hiera-small", help="SAM 2 model for --sam."),
     device: str = typer.Option("auto", help="Device for --sam."),
+    class_name: str | None = typer.Option(None, "--class", help="Class to edit first (keys "
+                                          "1-9 switch class)."),
 ) -> None:
     """Correct masks with a brush (and SAM clicks); saving marks an item as reviewed."""
     _require_gui()
@@ -1727,8 +1760,12 @@ def label(
 
         segment = Sam2VideoSegmenter(model_name=sam_model, prompts=Prompts(),
                                      device=device).segment_single
-    counts = edit_labels(ds, start=start, only_unreviewed=unreviewed, by_priority=by_priority,
-                         sam=segment)
+    try:
+        counts = edit_labels(ds, start=start, only_unreviewed=unreviewed,
+                             by_priority=by_priority, sam=segment, class_name=class_name)
+    except KeyError as exc:
+        typer.secho(str(exc).strip("'\""), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
     typer.echo(f"Saved {counts['saved']} item(s); "
                f"{sum(i.reviewed for i in ds.items)}/{len(ds.items)} reviewed")
 
@@ -1775,7 +1812,13 @@ def models_show(model: Path = typer.Argument(..., help="Model folder.")) -> None
     training = card.get("training", {})
     typer.echo(f"{m.name}  ({m.path})")
     typer.echo(f"  created {m.created_utc} with fungus-cv {card.get('fungus_cv_version', '?')}")
-    typer.echo(f"  {m.encoder} U-Net, threshold {m.threshold}")
+    classes = card.get("classes") or ["target"]
+    typer.echo(f"  {m.encoder} U-Net, class{'es' if len(classes) > 1 else ''} "
+               f"{', '.join(classes)}, threshold{'s' if len(classes) > 1 else ''} "
+               + (", ".join(f"{c} {t:.2f}" for c, t in (card.get("thresholds") or {}).items())
+                  if len(classes) > 1 else f"{m.threshold}"))
+    for name, stats in ((card.get("validation") or {}).get("per_class") or {}).items():
+        typer.echo(f"  validation IoU for {name}: {stats.get('iou_mean', float('nan')):.4f}")
     typer.echo(f"  dataset {m.dataset} ({card.get('dataset', {}).get('path', '')}), "
                f"fingerprint {m.fingerprint}; split: {card.get('dataset', {}).get('split', '')}")
     typer.echo(f"  {m.n_train} training / {m.n_val} validation items, "

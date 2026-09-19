@@ -50,13 +50,14 @@ class _Up(nn.Module):
 
 
 class ResNetUNet(nn.Module):
-    """Outputs one logit per pixel at full input resolution.
+    """Outputs one logit per pixel and class at full input resolution (``classes`` channels;
+    classes may overlap, so each is its own yes/no).
 
     A small full-resolution branch feeds the last decoder stage so mask edges are not
     limited to the encoder's /2 resolution.
     """
 
-    def __init__(self, encoder: str = "resnet34", pretrained: bool = True):
+    def __init__(self, encoder: str = "resnet34", pretrained: bool = True, classes: int = 1):
         super().__init__()
         import torchvision.models as tvm
 
@@ -87,7 +88,7 @@ class ResNetUNet(nn.Module):
         self.up2 = _Up(128, c1, 64)
         self.up1 = _Up(64, c0, 32)
         self.up0 = _Up(32, 16, 16)
-        self.head = nn.Conv2d(16, 1, 1)
+        self.head = nn.Conv2d(16, classes, 1)
 
     def forward(self, x):
         full = self.full_res(x)

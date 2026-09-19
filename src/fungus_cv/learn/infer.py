@@ -28,6 +28,21 @@ class LoadedModel:
     def threshold(self) -> float:
         return float(self.card.get("threshold", 0.5))
 
+    @property
+    def classes(self) -> list[str]:
+        return list(self.card.get("classes") or ["target"])
+
+    def class_index(self, class_name: str | None) -> int:
+        name = class_name or self.classes[0]
+        if name not in self.classes:
+            raise ValueError(f"model {self.path.name} has no class {name!r}; it has "
+                             f"{self.classes}")
+        return self.classes.index(name)
+
+    def threshold_for(self, class_name: str | None) -> float:
+        name = class_name or self.classes[0]
+        return float((self.card.get("thresholds") or {}).get(name, self.threshold))
+
 
 _CACHE: dict[tuple[str, str], LoadedModel] = {}
 
@@ -48,7 +63,8 @@ def load_trained(path: Path, device_pref: str = "auto") -> LoadedModel:
     if cached and cached.weights_sha256 == digest:
         return cached
     card = json.loads(card_path.read_text(encoding="utf-8"))
-    net = ResNetUNet(card["architecture"]["encoder"], pretrained=False)
+    net = ResNetUNet(card["architecture"]["encoder"], pretrained=False,
+                     classes=len(card.get("classes") or ["target"]))
     state = torch.load(weights_path, map_location="cpu", weights_only=True)
     net.load_state_dict(state)
     net.to(device).eval()
@@ -98,9 +114,11 @@ def predict_probabilities(
     net, image: np.ndarray, device, tile_px: int = 512, overlap_px: int = 64,
     predict_fn=None,
 ) -> np.ndarray:
-    """Per-pixel target probability for a BGR image of any size.
+    """Per-pixel probability for a BGR image of any size: H x W for a one-class model,
+    H x W x classes otherwise.
 
-    ``predict_fn(bgr_tile) -> logits (h, w)`` can replace the network (used in tests).
+    ``predict_fn(bgr_tile) -> logits (h, w) or (h, w, classes)`` can replace the network
+    (used in tests).
     """
     from fungus_cv.learn.unet import DIVISOR
 
@@ -115,7 +133,8 @@ def predict_probabilities(
             out = predict_fn(padded)
         else:
             with torch.no_grad():
-                out = net(_to_tensor(padded, torch, device))[0, 0].float().cpu().numpy()
+                out = net(_to_tensor(padded, torch, device))[0].float().cpu().numpy()
+            out = out[0] if out.shape[0] == 1 else np.moveaxis(out, 0, -1)
         return out[:ph, :pw]
 
     if h <= tile and w <= tile:
@@ -123,13 +142,17 @@ def predict_probabilities(
 
     th, tw = min(tile, h), min(tile, w)
     overlap = min(overlap_px, th // 2, tw // 2)
-    total = np.zeros((h, w), np.float32)
-    weight = np.zeros((h, w), np.float32)
+    total = weight = None
     wy, wx = _ramp(th, overlap if h > th else 0), _ramp(tw, overlap if w > tw else 0)
     blend = np.outer(wy, wx) + 1e-6
     for y in _tile_starts(h, th, overlap):
         for x in _tile_starts(w, tw, overlap):
             logits = logits_for(image[y:y + th, x:x + tw])
-            total[y:y + th, x:x + tw] += logits * blend
+            if total is None:  # the first tile says how many classes there are
+                total = np.zeros((h, w, *logits.shape[2:]), np.float32)
+                weight = np.zeros((h, w), np.float32)
+            b = blend if logits.ndim == 2 else blend[..., None]
+            total[y:y + th, x:x + tw] += logits * b
             weight[y:y + th, x:x + tw] += blend
-    return 1.0 / (1.0 + np.exp(-(total / weight)))
+    ratio = total / (weight if total.ndim == 2 else weight[..., None])
+    return 1.0 / (1.0 + np.exp(-ratio))

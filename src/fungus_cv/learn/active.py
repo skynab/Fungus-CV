@@ -43,18 +43,22 @@ def iou(a: np.ndarray, b: np.ndarray) -> float:
     return int((a & b).sum()) / union if union else 1.0  # both empty = full agreement
 
 
-def model_prob_fn(model_dir: Path, device: str = "auto") -> tuple[ProbFn, float]:
-    """Probability function and tuned threshold of a model trained with `fungus train`."""
+def model_prob_fn(model_dir: Path, device: str = "auto",
+                  class_name: str | None = None) -> tuple[ProbFn, float]:
+    """Probability function and tuned threshold of a model trained with `fungus train`
+    (for a multi-class model, of ``class_name``, default its first class)."""
     from fungus_cv.learn.infer import load_trained, predict_probabilities
 
     loaded = load_trained(Path(model_dir), device)
     config = loaded.card["training"]["config"]
     tile, overlap = config.get("tile_px", 512), config.get("overlap_px", 64)
+    k = loaded.class_index(class_name)
 
     def prob(image: np.ndarray) -> np.ndarray:
-        return predict_probabilities(loaded.net, image, loaded.device, tile, overlap)
+        p = predict_probabilities(loaded.net, image, loaded.device, tile, overlap)
+        return p[..., k] if p.ndim == 3 else p
 
-    return prob, loaded.threshold
+    return prob, loaded.threshold_for(class_name)
 
 
 def tta_probabilities(prob_fn: ProbFn, image: np.ndarray) -> list[np.ndarray]:

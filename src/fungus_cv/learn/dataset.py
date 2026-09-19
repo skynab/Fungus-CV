@@ -9,6 +9,11 @@
 
 Masks are plain PNGs, so they can also be edited in other tools (GIMP, CVAT, Label Studio).
 Only items marked ``reviewed`` (checked by a person) are used for training by default.
+
+A dataset has one class (``target``) unless more are added: e.g. ``stem`` and ``moss``, which
+may overlap (moss grows on the stem). Single-class masks are 0/255. With several classes each
+mask pixel stores one bit per class (bit 0 = the first class, ...), up to 8 classes; use
+`fungus dataset export-coco` to edit those in other tools.
 """
 
 from __future__ import annotations
@@ -25,6 +30,8 @@ import numpy as np
 from fungus_cv.storage import iso_utc, utc_now
 
 INDEX_NAME = "dataset.json"
+DEFAULT_CLASS = "target"
+MAX_CLASSES = 8  # one bit each in an 8-bit mask
 
 
 @dataclass
@@ -50,6 +57,7 @@ class Dataset:
     description: str = ""
     items: list[Item] = field(default_factory=list)
     created_utc: str = ""
+    classes: list[str] = field(default_factory=lambda: [DEFAULT_CLASS])
 
     # --- persistence -----------------------------------------------------------------
 
@@ -77,6 +85,7 @@ class Dataset:
             description=data.get("description", ""),
             items=[Item(**item) for item in data.get("items", [])],
             created_utc=data.get("created_utc", ""),
+            classes=list(data.get("classes") or [DEFAULT_CLASS]),
         )
 
     @classmethod
@@ -88,6 +97,7 @@ class Dataset:
             "name": self.name,
             "description": self.description,
             "created_utc": self.created_utc,
+            "classes": self.classes,
             "items": [asdict(i) for i in self.items],
         }
         tmp = self.root / (INDEX_NAME + ".part")
@@ -99,14 +109,44 @@ class Dataset:
     def get(self, item_id: str) -> Item | None:
         return next((i for i in self.items if i.id == item_id), None)
 
+    # --- classes ---------------------------------------------------------------------
+
+    @property
+    def multi_class(self) -> bool:
+        return len(self.classes) > 1
+
+    def class_bit(self, class_name: str | None) -> int:
+        name = class_name or self.classes[0]
+        if name not in self.classes:
+            raise KeyError(f"no class {name!r} in this dataset; it has {self.classes}")
+        return self.classes.index(name)
+
+    def add_class(self, name: str) -> None:
+        """Add a class. The first time, existing 0/255 masks become bit 0 (the first class)."""
+        name = name.strip()
+        if not name or name in self.classes:
+            raise ValueError(f"class {name!r} is empty or already in the dataset")
+        if len(self.classes) >= MAX_CLASSES:
+            raise ValueError(f"at most {MAX_CLASSES} classes")
+        if not self.multi_class:
+            for item in self.items:
+                if (self.root / item.mask).exists():
+                    first = self._read_raw(item) > 127
+                    cv2.imwrite(str(self.root / item.mask), first.astype(np.uint8))
+        self.classes.append(name)
+        self.save()
+
     def add(
         self,
         image: np.ndarray,
         mask: np.ndarray,
         item_id: str,
         replace: bool = False,
+        class_name: str | None = None,
         **fields,
     ) -> Item:
+        """Add an image with its mask for ``class_name`` (default: the first class), or with
+        every class at once when ``mask`` is H x W x classes."""
         item_id = safe_id(item_id)
         if image.shape[:2] != mask.shape[:2]:
             raise ValueError(f"{item_id}: image {image.shape[:2]} and mask {mask.shape[:2]} differ")
@@ -116,7 +156,12 @@ class Dataset:
         item = Item(id=item_id, image=f"images/{item_id}.png", mask=f"masks/{item_id}.png",
                     **fields)
         cv2.imwrite(str(self.root / item.image), image)
-        self.write_mask(item, mask)
+        if existing is None and (self.root / item.mask).exists():
+            (self.root / item.mask).unlink()  # a stale file from a removed item
+        if mask.ndim == 3:
+            self.write_labels(item, mask)
+        else:
+            self.write_mask(item, mask, class_name)
         if existing:
             self.items[self.items.index(existing)] = item
         else:
@@ -129,14 +174,53 @@ class Dataset:
             raise FileNotFoundError(self.root / item.image)
         return img
 
-    def load_mask(self, item: Item) -> np.ndarray:
+    def _read_raw(self, item: Item) -> np.ndarray:
         m = cv2.imread(str(self.root / item.mask), cv2.IMREAD_GRAYSCALE)
         if m is None:
             raise FileNotFoundError(self.root / item.mask)
-        return m > 127
+        return m
 
-    def write_mask(self, item: Item, mask: np.ndarray) -> None:
-        cv2.imwrite(str(self.root / item.mask), mask.astype(np.uint8) * 255)
+    def load_mask(self, item: Item, class_name: str | None = None) -> np.ndarray:
+        """The mask of one class (default: the first)."""
+        bit = self.class_bit(class_name)
+        raw = self._read_raw(item)
+        if not self.multi_class:
+            return raw > 127
+        return ((raw >> bit) & 1).astype(bool)
+
+    def load_labels(self, item: Item) -> np.ndarray:
+        """Every class at once: H x W x classes, booleans (classes may overlap)."""
+        raw = self._read_raw(item)
+        if not self.multi_class:
+            return (raw > 127)[..., None]
+        return np.stack([((raw >> k) & 1).astype(bool) for k in range(len(self.classes))], -1)
+
+    def write_mask(self, item: Item, mask: np.ndarray, class_name: str | None = None) -> None:
+        """Replace one class's mask, keeping the other classes."""
+        bit = self.class_bit(class_name)
+        path = self.root / item.mask
+        mask = np.asarray(mask, bool)
+        if not self.multi_class:
+            cv2.imwrite(str(path), mask.astype(np.uint8) * 255)
+            return
+        raw = self._read_raw(item) if path.exists() else np.zeros(mask.shape, np.uint8)
+        if raw.shape != mask.shape:
+            raise ValueError(f"{item.id}: mask {mask.shape} differs from {raw.shape}")
+        raw = (raw & np.uint8(~(1 << bit) & 0xFF)) | (mask.astype(np.uint8) << bit)
+        cv2.imwrite(str(path), raw)
+
+    def write_labels(self, item: Item, labels: np.ndarray) -> None:
+        labels = np.asarray(labels, bool)
+        if labels.shape[-1] != len(self.classes):
+            raise ValueError(f"{item.id}: {labels.shape[-1]} class layer(s) for "
+                             f"{len(self.classes)} classes")
+        if not self.multi_class:
+            self.write_mask(item, labels[..., 0])
+            return
+        raw = np.zeros(labels.shape[:2], np.uint8)
+        for k in range(labels.shape[-1]):
+            raw |= labels[..., k].astype(np.uint8) << k
+        cv2.imwrite(str(self.root / item.mask), raw)
 
     def selected(self, reviewed_only: bool = True) -> list[Item]:
         return [i for i in self.items if i.reviewed or not reviewed_only]
@@ -144,6 +228,8 @@ class Dataset:
     def fingerprint(self, items: list[Item] | None = None) -> str:
         """Hash of image and mask contents, so a trained model records exactly its data."""
         h = hashlib.sha256()
+        if self.multi_class:  # single-class fingerprints stay what they were
+            h.update(json.dumps(self.classes).encode())
         for item in sorted(items if items is not None else self.items, key=lambda i: i.id):
             h.update(item.id.encode())
             for rel in (item.image, item.mask):

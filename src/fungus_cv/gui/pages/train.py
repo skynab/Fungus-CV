@@ -333,6 +333,10 @@ class TrainPage(QWidget):
                          "these numbers are optimistic.")
         else:
             lines.append("No validation data: the model is unchecked.")
+        per_class = card["validation"].get("per_class") or {}
+        if per_class:
+            lines.append("Per class: " + ", ".join(
+                f"{name} IoU {stats['iou_mean']:.3f}" for name, stats in per_class.items()))
         self.card.setText("<br>".join(lines))
         self._draw_history(training["history"])
         self.card_btn.setEnabled(True)

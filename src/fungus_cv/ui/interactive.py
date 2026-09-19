@@ -325,8 +325,11 @@ def combine_masks(mask: np.ndarray, proposal: np.ndarray, mode: str) -> np.ndarr
 
 
 def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False,
-                by_priority: bool = False, sam=None) -> dict:
+                by_priority: bool = False, sam=None, class_name: str | None = None) -> dict:
     """Brush editor for dataset masks. Saving an item marks it reviewed.
+
+    With several classes, ``class_name`` is the one edited first and keys 1-9 switch class
+    (the others are shown faintly in cyan).
 
     ``by_priority`` shows the most useful items first (`fungus dataset rank`/`suggest`).
     ``sam(image, FramePrompt) -> mask`` enables click-to-segment: press m, click the target
@@ -352,10 +355,23 @@ def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False,
         clicks.update(points=[], labels=[], box=None, drag=None, box_mode=False,
                       proposal=None, dirty=False, error="")
 
+    state["class"] = class_name or dataset.classes[0]
+    dataset.class_bit(state["class"])  # a wrong class name fails here, before any window
+
+    def others(item) -> np.ndarray | None:
+        """Union of the classes not being edited, to show faintly."""
+        if not dataset.multi_class:
+            return None
+        labels = dataset.load_labels(item)
+        k = dataset.class_bit(state["class"])
+        rest = np.delete(labels, k, axis=-1)
+        return rest.any(axis=-1) if rest.size else None
+
     def load(i: int) -> None:
         item = items[i]
         image = dataset.load_image(item)
-        state.update(item=item, image=image, mask=dataset.load_mask(item),
+        state.update(other=others(item))
+        state.update(item=item, image=image, mask=dataset.load_mask(item, state["class"]),
                      undo=[], view=_View(image, window), painting=0, dirty=False,
                      show_mask=True, sam_mode=state.get("sam_mode", False))
         reset_clicks()
@@ -413,7 +429,7 @@ def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False,
 
     def save() -> None:
         item = state["item"]
-        dataset.write_mask(item, state["mask"])
+        dataset.write_mask(item, state["mask"], state["class"])
         item.reviewed = True
         dataset.save()
         state["dirty"] = False
@@ -438,6 +454,13 @@ def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False,
                     except Exception as exc:  # show the problem instead of crashing the tool
                         clicks["error"] = str(exc)[:120]
             canvas = view.base.copy()
+            if state["show_mask"] and state.get("other") is not None:
+                size = (canvas.shape[1], canvas.shape[0])
+                faint = cv2.resize(state["other"].astype(np.uint8), size,
+                                   interpolation=cv2.INTER_NEAREST).astype(bool)
+                tint = canvas.copy()
+                tint[faint] = (255, 255, 0)
+                canvas = cv2.addWeighted(tint, 0.25, canvas, 0.75, 0)
             if state["show_mask"]:
                 size = (canvas.shape[1], canvas.shape[0])
                 small = cv2.resize(state["mask"].astype(np.uint8), size,
@@ -472,6 +495,10 @@ def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False,
             unsaved = "  *unsaved*" if state["dirty"] else ""
             priority = "" if item.priority is None else f"  priority {item.priority:.2f}"
             lines = [f"{idx + 1}/{len(items)}  {item.id}  [{status}]{priority}{unsaved}"]
+            if dataset.multi_class:
+                lines[0] += "   class: " + "  ".join(
+                    f"[{n + 1} {c}]" if c == state["class"] else f"{n + 1} {c}"
+                    for n, c in enumerate(dataset.classes))
             if state["sam_mode"]:
                 lines += [
                     "SAM: left click target, right click NOT target, b: box, u: undo click, "
@@ -491,6 +518,16 @@ def edit_labels(dataset, start: int = 0, only_unreviewed: bool = False,
             view.show(canvas, lines)
 
             key = cv2.waitKey(15) & 0xFF
+            if dataset.multi_class and ord("1") <= key <= ord(str(len(dataset.classes))):
+                chosen = dataset.classes[key - ord("1")]
+                if chosen != state["class"]:
+                    if state["dirty"]:  # keep the edits to this class, not yet reviewed
+                        dataset.write_mask(state["item"], state["mask"], state["class"])
+                    state["class"] = chosen
+                    state.update(mask=dataset.load_mask(state["item"], chosen),
+                                 other=others(state["item"]), undo=[], dirty=False)
+                    reset_clicks()
+                continue
             if key == ord("m") and sam is not None:
                 state["sam_mode"] = not state["sam_mode"]
                 reset_clicks()

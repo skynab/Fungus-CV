@@ -525,12 +525,15 @@ def pick_color(
         None, help="Image to sample from (default: the last frame, where the target is largest)."
     ),
     write: bool = typer.Option(True, help="Write the ranges into config.yaml."),
+    color_class: str | None = typer.Option(
+        None, "--class", help="Save the ranges as this named colour class (e.g. brown) for "
+        "whole-field change, instead of as the target's colour."),
 ) -> None:
     """Measure the target's color by dragging boxes over it, then save the HSV ranges."""
     _require_gui()
     import cv2
 
-    from fungus_cv.config import replace_hsv_ranges_in_yaml
+    from fungus_cv.config import replace_hsv_ranges_in_yaml, set_color_class_in_yaml
     from fungus_cv.ui.interactive import Cancelled
     from fungus_cv.ui.interactive import pick_color as run_pick
 
@@ -558,8 +561,15 @@ def pick_color(
     snippet = "\n".join(f"  - lower: {list(lo)}\n    upper: {list(hi)}" for lo, hi in ranges)
     if write:
         text = exp.config_path.read_text(encoding="utf-8")
-        exp.config_path.write_text(replace_hsv_ranges_in_yaml(text, ranges), encoding="utf-8")
-        typer.echo(f"Updated hsv_ranges in {exp.config_path}:\n{snippet}")
+        try:
+            text = (set_color_class_in_yaml(text, color_class, ranges) if color_class
+                    else replace_hsv_ranges_in_yaml(text, ranges))
+        except ValueError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(1) from exc
+        exp.config_path.write_text(text, encoding="utf-8")
+        what = f"colour class {color_class!r}" if color_class else "hsv_ranges"
+        typer.echo(f"Updated {what} in {exp.config_path}:\n{snippet}")
     else:
         typer.echo(f"hsv_ranges:\n{snippet}")
 
@@ -829,6 +839,48 @@ def prompt(
     if block.method != "sam2":
         which = "reference" if reference else "target"
         typer.echo(f"Note: set analysis.{which}.method: sam2 in config.yaml to use these prompts.")
+
+
+@app.command()
+def summary(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    metric: str | None = typer.Option(None, help="Column to fit (default as for report)."),
+    camera: str | None = typer.Option(None, help="Which camera's results."),
+    out: Path | None = typer.Option(None, help="Where to write (default "
+                                    "results/summary.html)."),
+    model: list[str] = typer.Option([], help="Model(s) to fit (repeatable)."),
+    bootstrap: int = typer.Option(500, help="Bootstrap refits for the 95% intervals."),
+    include_flagged: bool = typer.Option(False, help="Fit flagged frames too."),
+    exclude_jumps: bool = typer.Option(False, help="Leave jumps out of the fits."),
+    time_to: list[float] = typer.Option([], help="Also report when the curve reaches this "
+                                        "value (repeatable)."),
+) -> None:
+    """One self-contained HTML page with every plot's figures, fits, intervals, what was left
+    out and why, the settings and the software version: for sharing."""
+    from fungus_cv.analyze.fit import DEFAULT_MODELS, MODELS
+    from fungus_cv.analyze.pipeline import results_dir_for
+    from fungus_cv.analyze.report import DEFAULT_EXCLUDE
+    from fungus_cv.analyze.summary import make_summary
+
+    exp = _load_experiment(experiment)
+    _setup_logging()
+    unknown = [m for m in model if m not in MODELS]
+    if unknown:
+        typer.secho(f"unknown model(s) {unknown}; choose from {list(MODELS)}",
+                    fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    try:
+        result = make_summary(exp, metric=metric, results_dir=results_dir_for(exp, camera),
+                              out=out, models=tuple(model) or DEFAULT_MODELS,
+                              bootstrap=bootstrap, time_to=tuple(time_to),
+                              exclude_flags=() if include_flagged else DEFAULT_EXCLUDE,
+                              exclude_jumps=exclude_jumps)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    for problem in result.problems:
+        typer.secho(f"not fitted: {problem}", fg=typer.colors.YELLOW)
+    typer.echo(f"Wrote {result.path} ({len(result.reports)} plot(s))")
 
 
 @app.command()

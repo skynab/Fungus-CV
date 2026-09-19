@@ -130,6 +130,15 @@ class HsvRange(BaseModel):
         return self
 
 
+class ColorClass(BaseModel):
+    """A named colour for whole-field change: every plot gets the share of it over time."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=r"^[A-Za-z0-9_]+$")  # becomes the column class_<name>_pct
+    hsv_ranges: list[HsvRange] = Field(min_length=1)
+
+
 class ColorTargetConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -268,10 +277,19 @@ class AnalysisConfig(BaseModel):
     reference: ReferenceConfig = Field(default_factory=ReferenceConfig)
     measure: MeasureConfig = Field(default_factory=MeasureConfig)
     uncertainty: UncertaintyConfig = Field(default_factory=UncertaintyConfig)
+    # Named colours (e.g. healthy, yellowing, brown): the share of each plot in each, per frame.
+    color_classes: list[ColorClass] = Field(default_factory=list)
     # Front position across the object's width: 50 = median front, 100 = highest point.
     front_percentile: float = Field(50.0, ge=0, le=100)
     save_masks: bool = True
     save_overlays: bool = True
+
+    @model_validator(mode="after")
+    def _unique_classes(self) -> AnalysisConfig:
+        names = [c.name for c in self.color_classes]
+        if len(names) != len(set(names)):
+            raise ValueError(f"colour class names must be unique: {names}")
+        return self
 
 
 class ExperimentConfig(BaseModel):
@@ -420,6 +438,8 @@ analysis:
     hsv_delta: [4, 20, 20]    # color: HSV bounds moved in and out by this much
     probability_delta: 0.1    # model: probability threshold +/- this
     logit_delta: 1.0          # sam2: mask_threshold +/- this
+  color_classes: []       # named colours for whole-field change, e.g. healthy / brown;
+                          # `fungus pick-color EXP --class brown` adds one
   front_percentile: 50    # front across the width: 50 = median, 100 = highest point
   save_masks: true
   save_overlays: true
@@ -452,6 +472,55 @@ def replace_hsv_ranges_in_yaml(text: str, ranges, section: str = "target") -> st
     for lower, upper in ranges:
         block.append(f"{pad}- lower: [{', '.join(map(str, lower))}]\n")
         block.append(f"{pad}  upper: [{', '.join(map(str, upper))}]\n")
+    new_text = "".join(lines[:i] + block + lines[end:])
+    yaml.safe_load(new_text)  # never write a config that no longer parses
+    return new_text
+
+
+def set_color_class_in_yaml(text: str, name: str, ranges) -> str:
+    """Add colour class ``name`` to ``analysis.color_classes`` (or replace its ranges),
+    keeping every other line of the config as it is."""
+    ColorClass(name=name, hsv_ranges=[HsvRange(lower=lo, upper=hi) for lo, hi in ranges])
+    current = (yaml.safe_load(text) or {}).get("analysis", {}).get("color_classes") or []
+    entries = [dict(c) for c in current if c.get("name") != name]
+    entries.append({"name": name, "hsv_ranges": [
+        {"lower": list(lo), "upper": list(hi)} for lo, hi in ranges]})
+    order = [c.get("name") for c in current]
+    if name in order:  # keep its place: the first matching class wins, so order matters
+        entries.insert(order.index(name), entries.pop())
+
+    lines = text.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    try:
+        i = _find_key_line(lines, "analysis.color_classes")
+        indent = len(lines[i]) - len(lines[i].lstrip(" "))
+        end = i + 1
+        while end < len(lines):
+            stripped = lines[end].strip()
+            current_indent = len(lines[end]) - len(lines[end].lstrip(" "))
+            if stripped and current_indent <= indent and not stripped.startswith("- "):
+                break
+            end += 1
+        while end > i + 1 and not lines[end - 1].strip():  # keep blank lines that follow
+            end -= 1
+    except KeyError:
+        try:
+            i = end = _find_key_line(lines, "analysis.front_percentile")
+            indent = len(lines[i]) - len(lines[i].lstrip(" "))
+        except KeyError:
+            a = _find_key_line(lines, "analysis")
+            i = end = a + 1
+            nxt = next((ln for ln in lines[a + 1:] if ln.strip()), "  x")
+            indent = max(len(nxt) - len(nxt.lstrip(" ")), 2)
+    pad = " " * indent
+    block = [f"{pad}color_classes:\n"]
+    for entry in entries:
+        block.append(f"{pad}  - name: {entry['name']}\n")
+        block.append(f"{pad}    hsv_ranges:\n")
+        for r in entry["hsv_ranges"]:
+            block.append(f"{pad}      - lower: [{', '.join(map(str, r['lower']))}]\n")
+            block.append(f"{pad}        upper: [{', '.join(map(str, r['upper']))}]\n")
     new_text = "".join(lines[:i] + block + lines[end:])
     yaml.safe_load(new_text)  # never write a config that no longer parses
     return new_text

@@ -73,6 +73,25 @@ class ReportPage(QWidget):
         buttons.addWidget(self.make_btn)
         buttons.addWidget(self.folder_btn)
         form.addRow(buttons)
+        # More analyses of the same results.
+        self.spread_btn = QPushButton("Spread map")
+        self.spread_btn.setToolTip("When each point was first covered, and how fast the front "
+                                   "moved in each direction (uses coverage).")
+        self.spread_btn.clicked.connect(self.make_spread)
+        self.sensitivity_btn = QPushButton("Sensitivity check")
+        self.sensitivity_btn.setToolTip("Re-measure with each questionable setting changed a "
+                                        "little and show how much the result moves. Slow: it "
+                                        "re-runs the analysis once per variant.")
+        self.sensitivity_btn.clicked.connect(self.make_sensitivity)
+        self.summary_btn = QPushButton("Shareable page")
+        self.summary_btn.setToolTip("One self-contained HTML page with every plot's figures, "
+                                    "fits, intervals, exclusions and settings.")
+        self.summary_btn.clicked.connect(self.make_summary)
+        more = QHBoxLayout()
+        for button in (self.spread_btn, self.sensitivity_btn, self.summary_btn):
+            more.addWidget(button)
+        form.addRow(more)
+        self.extra_buttons = (self.spread_btn, self.sensitivity_btn, self.summary_btn)
         self.message = QLabel()
         self.message.setWordWrap(True)
 
@@ -91,6 +110,10 @@ class ReportPage(QWidget):
         self.quality = ImageView()
         self.tabs.addTab(self.chart, "Measurement")
         self.tabs.addTab(self.quality, "Quality checks")
+        self.spread_view = ImageView()
+        self.sensitivity_view = ImageView()
+        self.tabs.addTab(self.spread_view, "Spread")
+        self.tabs.addTab(self.sensitivity_view, "Sensitivity")
 
         left = QVBoxLayout()
         left.addWidget(options)
@@ -114,6 +137,8 @@ class ReportPage(QWidget):
         self.plot.clear()
         self.metric.clear()
         self.make_btn.setEnabled(False)
+        for button in self.extra_buttons:
+            button.setEnabled(False)
         if exp is None:
             self.message.setText("Open an experiment first.")
             return
@@ -129,8 +154,12 @@ class ReportPage(QWidget):
         self.plot.addItems(plots)
         available = [m for m in METRICS if m.startswith("edge_advance")
                      or any(r.get(m, "") != "" for r in rows[:50])]
+        available += [c for c in (rows[0] if rows else {})  # colour classes
+                      if c.startswith("class_") and c.endswith("_pct")]
         self.metric.addItems(available)
         self.make_btn.setEnabled(True)
+        for button in self.extra_buttons:
+            button.setEnabled(True)
         self.message.setText("")
 
     def make(self) -> None:
@@ -189,6 +218,102 @@ class ReportPage(QWidget):
             elif name.endswith("quality_checks.png"):
                 self.quality.set_image(cv2.imread(name))
         self.tabs.setCurrentIndex(0)
+
+    # --- spread, sensitivity, shareable page ---------------------------------------------
+
+    def _busy(self, busy: bool, text: str = "") -> None:
+        for button in (self.make_btn, *self.extra_buttons):
+            button.setEnabled(not busy)
+        if text:
+            self.message.setText(text)
+
+    def _extra_failed(self, message: str) -> None:
+        self._busy(False)
+        self._failed(message)
+
+    def make_spread(self) -> None:
+        exp = self.state.experiment
+        if exp is None:
+            return
+        from fungus_cv.analyze.spread import spread
+
+        plot, camera = self.plot.currentText() or None, self.state.camera
+        self._busy(True, "Mapping when each point was reached…")
+        run_task(lambda progress, stop: spread(exp, plot=plot, camera=camera),
+                 self._spread_done, self._extra_failed)
+
+    def _spread_done(self, result) -> None:
+        self._busy(False)
+        unit = f"{result.unit}/{result.time_unit}"
+        fastest = max((s for s in result.sectors if s.speed == s.speed), default=None,
+                      key=lambda s: s.speed)
+        text = f"Spread: mean front speed {result.mean_speed:.3g} {unit}"
+        if fastest is not None:
+            text += (f", fastest toward {fastest.angle_deg:.0f}° ({fastest.speed:.3g} ± "
+                     f"{fastest.se:.2g}); fastest/slowest {result.anisotropy:.2f} "
+                     "(1 = even)")
+        self.message.setText(text + ". 0° = right, 90° = up.")
+        for path in result.files:
+            if str(path).endswith("spread_map.png"):
+                self.spread_view.set_image(cv2.imread(str(path)))
+                self.tabs.setCurrentWidget(self.spread_view)
+
+    def make_sensitivity(self) -> None:
+        exp = self.state.experiment
+        if exp is None:
+            return
+        from fungus_cv.analyze import sensitivity
+
+        metric = self.metric.currentText() or None
+        plot = self.plot.currentText() or None
+        self._busy(True, "Re-measuring with each setting changed…")
+        run_task(lambda progress, stop: sensitivity.run(
+                     exp, metric=metric, plot=plot,
+                     progress=lambda n, total, name: progress((n, total, name))),
+                 self._sensitivity_done, self._extra_failed, self._sensitivity_progress)
+
+    def _sensitivity_progress(self, value) -> None:
+        n, total, name = value
+        self.message.setText(f"Sensitivity: variant {n} of {total} ({name})…")
+
+    def _sensitivity_done(self, result) -> None:
+        self._busy(False)
+        largest = result.largest
+        text = f"Sensitivity of {result.metric}: {len(result.variants)} variant(s) run"
+        if largest is not None:
+            text += (f"; the largest mean change, {largest.mean_abs_change:.3g}, came from "
+                     f"{largest.variant.description}")
+            if largest.change_in_uncertainties == largest.change_in_uncertainties:
+                text += (f" ({largest.change_in_uncertainties:.2g}× the reported "
+                         "uncertainty)")
+        failed = [v.variant.name for v in result.variants if not v.ok]
+        if failed:
+            text += f". Failed: {', '.join(failed)}"
+        self.message.setText(text + ".")
+        for path in result.files:
+            if str(path).endswith(".png"):
+                self.sensitivity_view.set_image(cv2.imread(str(path)))
+                self.tabs.setCurrentWidget(self.sensitivity_view)
+                break
+
+    def make_summary(self) -> None:
+        exp = self.state.experiment
+        if exp is None:
+            return
+        from fungus_cv.analyze.summary import make_summary
+
+        metric = self.metric.currentText() or None
+        results_dir = self.state.results_dir()
+        self._busy(True, "Fitting every plot and writing the page…")
+        run_task(lambda progress, stop: make_summary(exp, metric=metric,
+                                                     results_dir=results_dir),
+                 self._summary_done, self._extra_failed)
+
+    def _summary_done(self, result) -> None:
+        self._busy(False)
+        problems = f" Not fitted: {'; '.join(result.problems)}." if result.problems else ""
+        self.message.setText(f"Wrote {result.path.name} in {result.path.parent}.{problems}")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(result.path)))
 
     def open_folder(self) -> None:
         exp = self.state.experiment

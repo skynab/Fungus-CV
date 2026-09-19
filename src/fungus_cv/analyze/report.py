@@ -346,6 +346,8 @@ def make_report(
              "gcc_p90": "Green chromatic coordinate (90th pct)",
              "rcc_mean": "Red chromatic coordinate (mean)",
              "exg_mean": "Excess green (mean)"}.get(metric, metric)
+    if metric.startswith("class_") and metric.endswith("_pct"):
+        label = f"Share {metric[6:-4]} (%)"
     fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
     _style(ax)
     if np.isfinite(unc[use]).any():

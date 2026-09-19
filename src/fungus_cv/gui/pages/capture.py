@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import time
 
@@ -114,6 +115,22 @@ class CapturePage(QWidget):
         live_form.addRow("Chart", self.watch_metric)
         live_form.addRow(self.watch_status)
 
+        # Health: heartbeat, recent frames, disk. Also watches a capture run elsewhere (a
+        # background service or another computer sharing the folder).
+        self.health_report = None
+        self._health_busy = False
+        health_box = QGroupBox("Run health")
+        health_layout = QVBoxLayout(health_box)
+        self.health = QLabel("Not checked yet.")
+        self.health.setWordWrap(True)
+        self.health_btn = QPushButton("Check now")
+        self.health_btn.clicked.connect(self.check_health)
+        health_layout.addWidget(self.health)
+        health_layout.addWidget(self.health_btn)
+        self.health_timer = QTimer(self)
+        self.health_timer.setInterval(60_000)
+        self.health_timer.timeout.connect(self.check_health)
+
         left = QVBoxLayout()
         left.addWidget(settings)
         buttons = QHBoxLayout()
@@ -121,6 +138,7 @@ class CapturePage(QWidget):
         buttons.addWidget(self.stop_btn)
         left.addLayout(buttons)
         left.addWidget(live)
+        left.addWidget(health_box)
         left.addWidget(self.status)
         left.addWidget(QLabel("Log"))
         left.addWidget(self.log, 1)
@@ -155,9 +173,15 @@ class CapturePage(QWidget):
     def refresh(self) -> None:
         exp = self.state.experiment
         self.start_btn.setEnabled(exp is not None and self.thread is None)
+        self.health_btn.setEnabled(exp is not None)
         if exp is None:
             self.status.setText("Open an experiment to capture.")
+            self.health_timer.stop()
+            self.health.setText("Not checked yet.")
             return
+        if not self.health_timer.isActive():
+            self.health_timer.start()
+        self.check_health()
         cap = exp.config.capture
         self.interval.setText(_fmt_seconds(cap.interval))
         self.duration.setText(_fmt_seconds(cap.duration))
@@ -361,7 +385,42 @@ class CapturePage(QWidget):
         fig.tight_layout()
         self.live_chart.set_figure(fig)
 
+    # --- health --------------------------------------------------------------------------
+
+    def check_health(self) -> None:
+        exp = self.state.experiment
+        if exp is None or self._health_busy:
+            return
+        from fungus_cv.capture import health
+
+        self._health_busy = True
+        run_task(lambda progress, stop: health.check(exp), self._health_done,
+                 self._health_failed, pool="io")
+
+    def _health_done(self, report) -> None:
+        self._health_busy = False
+        exp = self.state.experiment
+        if exp is None or report.root != exp.root:
+            return  # another experiment was opened meanwhile
+        self.health_report = report
+        colours = {"ok": SERIES[2], "warning": "#b36b00", "problem": "#b00020"}
+        marks = {"ok": "✓", "warning": "!", "problem": "✗"}
+        lines = []
+        for c in report.checks:
+            fix = f" <i>{html.escape(c.fix)}</i>" if c.fix and c.level != "ok" else ""
+            lines.append(f"<span style='color:{colours[c.level]}'>{marks[c.level]}</span> "
+                         f"<b>{html.escape(c.name)}</b>: {html.escape(c.detail)}{fix}")
+        when = report.checked_utc[11:16]
+        self.health.setText("<br>".join(lines)
+                            + f"<br><span style='color:{INK_2}'>checked {when} UTC; "
+                            "every minute while this page is open</span>")
+
+    def _health_failed(self, message: str) -> None:
+        self._health_busy = False
+        self.health.setText(f"<span style='color:#b00020'>Health check failed: {message}</span>")
+
     def shutdown(self) -> None:
+        self.health_timer.stop()
         if self.thread is not None:
             self.thread.stop()
             self.thread.wait(10000)

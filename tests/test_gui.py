@@ -673,3 +673,55 @@ def test_labels_page_edits_one_class_at_a_time(window, qtbot, tmp_path):
     item = saved.get("p1")
     assert saved.load_mask(item, "moss")[20, 50] and saved.load_mask(item, "target").sum() == 1600
     assert item.reviewed
+
+
+def test_capture_page_shows_run_health(window, qtbot, experiment):
+    from fungus_cv.capture.health import write_heartbeat
+
+    build_experiment(experiment, minutes=range(0, 3), bump_at=-1)
+    window.open_experiment(experiment.root)
+    capture = page(window, "Capture")
+    qtbot.waitUntil(lambda: capture.health_report is not None, timeout=20000)
+    assert "status.json" in capture.health.text()  # never captured here: a warning
+    assert capture.health_timer.isActive()
+
+    write_heartbeat(Experiment(experiment.root), state="finished", stopped_reason="duration")
+    capture.health_report = None
+    capture.check_health()
+    qtbot.waitUntil(lambda: capture.health_report is not None, timeout=20000)
+    assert "finished (duration)" in capture.health.text()
+
+
+def test_report_page_spread_sensitivity_and_summary(window, qtbot, experiment, monkeypatch):
+    from fungus_cv.analyze import sensitivity
+    from fungus_cv.analyze.pipeline import analyze
+    from fungus_cv.gui.pages import report as report_module
+
+    opened = []
+    monkeypatch.setattr(report_module.QDesktopServices, "openUrl",
+                        lambda url: opened.append(url.toLocalFile()))
+    build_experiment(experiment, minutes=range(0, 6), bump_at=-1)
+    analyze(Experiment(experiment.root))
+    window.open_experiment(experiment.root)
+    report = page(window, "Report")
+    report.refresh()
+    assert report.spread_btn.isEnabled()
+
+    report.make_spread()
+    qtbot.waitUntil(lambda: report.spread_btn.isEnabled() and "Spread" in
+                    report.message.text(), timeout=60000)
+    assert report.spread_view._has_image
+
+    # One quick variant keeps the test short; the page runs the default list.
+    one = [sensitivity.Variant("open_px_0", "no speck removal",
+                               {"target.color.open_px": 0})]
+    monkeypatch.setattr(sensitivity, "default_variants", lambda exp: one)
+    report.make_sensitivity()
+    qtbot.waitUntil(lambda: report.sensitivity_btn.isEnabled() and "Sensitivity of" in
+                    report.message.text(), timeout=120000)
+    assert "no speck removal" in report.message.text()
+    assert report.sensitivity_view._has_image
+
+    report.make_summary()
+    qtbot.waitUntil(lambda: bool(opened), timeout=120000)
+    assert opened[0].endswith("summary.html") and "Wrote summary.html" in report.message.text()

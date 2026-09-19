@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from fungus_cv import __version__
+from fungus_cv.measure import color_classes
 from fungus_cv.measure.centerline import CenterlineError, centerline_from_mask
 from fungus_cv.measure.color_indices import color_indices
 from fungus_cv.measure.geometry import (
@@ -334,10 +335,25 @@ class Analyzer:
             return set()
         return {r["frame_file"] for r in rows}
 
+    @property
+    def measurement_fields(self) -> list[str]:
+        """The fixed columns, then one share column (and its uncertainty) per colour class."""
+        extra = color_classes.columns([c.name for c in self.cfg.color_classes])
+        i = MEASUREMENT_FIELDS.index("mean_brightness")
+        return MEASUREMENT_FIELDS[:i] + extra + MEASUREMENT_FIELDS[i:]
+
+    def _class_shares(self, frame: np.ndarray, region: np.ndarray) -> dict[str, str]:
+        classes = [(c.name, [(tuple(r.lower), tuple(r.upper)) for r in c.hsv_ranges])
+                   for c in self.cfg.color_classes]
+        unc = self.cfg.uncertainty
+        delta = tuple(unc.hsv_delta) if unc.segmentation else None
+        return {k: _fmt(v, 3)
+                for k, v in color_classes.class_shares(frame, region, classes, delta).items()}
+
     def _append(self, row: dict) -> None:
         new = not self.measurements_path.exists()
         with open(self.measurements_path, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=MEASUREMENT_FIELDS)
+            writer = csv.DictWriter(f, fieldnames=self.measurement_fields)
             if new:
                 writer.writeheader()
             writer.writerow(row)
@@ -635,6 +651,7 @@ class Analyzer:
                 "extent_px_seg_unc": _fmt(seg.extent_px, 3)
                 if seg is not None and path is not None else "",
                 **{k: _fmt(v, 5) for k, v in color_indices(prepared.frame, region).items()},
+                **self._class_shares(prepared.frame, region),
                 "flags": ";".join(flags),
                 "extent_mm": "", "extent_mm_unc": "", "extent_mm_seg_unc": "",
                 "extent_max_mm": "", "axis_length_mm": "", "covered_length_mm": "",

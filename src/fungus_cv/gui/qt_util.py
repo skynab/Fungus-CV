@@ -171,11 +171,15 @@ def preload_modules() -> None:
     import fungus_cv.analyze.overlay  # noqa: F401
     import fungus_cv.analyze.pipeline  # noqa: F401
     import fungus_cv.analyze.report  # noqa: F401
+    import fungus_cv.analyze.sensitivity  # noqa: F401
+    import fungus_cv.analyze.spread  # noqa: F401
     import fungus_cv.analyze.study  # noqa: F401
     import fungus_cv.analyze.suite  # noqa: F401
+    import fungus_cv.analyze.summary  # noqa: F401
     import fungus_cv.analyze.validate  # noqa: F401
     import fungus_cv.capture.camera  # noqa: F401
     import fungus_cv.capture.diagnostics  # noqa: F401
+    import fungus_cv.capture.health  # noqa: F401
     import fungus_cv.capture.permissions  # noqa: F401
     import fungus_cv.capture.power  # noqa: F401
     import fungus_cv.capture.scheduler  # noqa: F401

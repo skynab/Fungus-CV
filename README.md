@@ -26,11 +26,11 @@ Fungus-CV has a desktop app with a page for each step, grouped in the sidebar:
 |---|---|---|
 | Capture | **Experiment** | open or create an experiment, key settings |
 | | **Camera** | live preview for framing and focus |
-| | **Capture** | scheduled photos with progress; optionally **measures new frames as they arrive** and charts them live |
+| | **Capture** | scheduled photos with progress; optionally **measures new frames as they arrive** and charts them live; **run health** checked every minute (also for a capture running as a service or on another computer) |
 | Measure | **Set up measurement** | click the base, stem path, region or field plots; drag over colours |
 | | **SAM prompts** | click on the target (or the stem) and see SAM 2's mask; save prompts per frame |
 | | **Analyze** | run the analysis; per-frame results shown as the overlay, the aligned frame with its mask, or the photo as taken; **exclude a frame by hand with a reason** |
-| | **Report** | fits with standard errors, bootstrap intervals, AICc weights and warnings; charts |
+| | **Report** | fits with standard errors, bootstrap intervals, AICc weights and warnings; charts; **spread map**, **sensitivity check** and a **shareable page** |
 | Models | **Labels** | open or create a dataset; add frames evenly or where a model is least sure; brush and SAM clicks; mark reviewed; rank with a model |
 | | **Train models** | train with a live loss / validation IoU chart, read the model card, use the model for the experiment, evaluate on other labeled data |
 | Results | **Study** | edit a study (replicates and conditions), run it, read condition summaries, comparisons, figures and the methods draft |
@@ -166,6 +166,22 @@ Output files:
 - Frames where the front moves back by more than 3σ are circled as worth checking.
 - **Figures for a paper:** `--format pdf --format svg` (repeatable, `png` by default) writes vector figures that stay sharp at any size; `--dpi` sets the png resolution. In the app, tick "Also save PDF and SVG". Study figures are always written as png, pdf and svg.
 
+### A page to share
+
+```bash
+fungus summary experiments/dye-test-1                 # results/summary.html
+fungus summary experiments/field-1 --metric class_brown_pct --out brown.html
+```
+
+One self-contained HTML file that opens anywhere, offline, with nothing else attached. For every plot it has:
+
+- the figures;
+- each model's parameters with standard errors and 95% intervals, Akaike weights, rates, lag and time-to-level;
+- the checks (R², χ²/ν, correlated errors, warnings);
+- what was left out and why (flags, jumps, frames excluded by hand with their reasons).
+
+It also has the frame count and time span, the scale, any spread maps and validation plots already made, the full analysis settings and the software version and commit. It's meant for a colleague or a lab notebook. For a paper, `fungus archive` is still the thing to keep.
+
 ## How much do the settings matter?
 
 ```bash
@@ -298,6 +314,8 @@ fungus analyze experiments/field-1
 fungus report experiments/field-1 --metric target_area_mm2          # one folder per plot
 fungus report experiments/field-1 --metric edge_advance_p95_mm --plot plot1
 fungus report experiments/field-1 --metric gcc_p90                  # greenness, no segmentation
+fungus pick-color experiments/field-1 --class brown                 # a named colour class
+fungus report experiments/field-1 --metric class_brown_pct          # share of each plot that is brown
 ```
 
 - **Top-down view:** with 4 markers and `rectify.enabled: true`, the field is measured as if seen from directly above, so areas are in true mm². Without rectification a single scale is wrong across a tilted view; the synthetic test was off by about 9%.
@@ -307,6 +325,7 @@ fungus report experiments/field-1 --metric gcc_p90                  # greenness,
   - `gcc_mean`, `gcc_p90` (green chromatic coordinate; its 90th percentile is the standard robust summary in phenology camera studies)
   - `rcc_mean`, the red chromatic coordinate
   - `exg_mean`, excess green
+- **Colour classes** (share of the field that is discoloured): name colours such as `healthy`, `yellowing` and `brown` with `pick-color --class NAME` (drag boxes over examples of each; run it once per class). Every plot then gets `class_<name>_pct` per frame, on the lighting-corrected frame, with an uncertainty `class_<name>_pct_unc`: the shares are also computed with every range narrowed and widened by `uncertainty.hsv_delta`, so a colour sitting on a class boundary shows up as a large uncertainty rather than a confident number. A pixel counts for the **first** class it matches (the order in `analysis.color_classes`), so the shares never add up to more than 100%. `report --metric class_brown_pct` fits them like any other measurement. On a synthetic field browning at a steady rate, with the lights dimmed in two frames, every share was within 1.5 percentage points of the painted area and the fitted rate within 5%.
 - **Edge advance** (`report --metric edge_advance_p95_mm` or `edge_advance_max_mm`): how far newly affected ground is from the patch's first outline, i.e. the first usable frame with any patch in the plot. It's computed from the saved masks, so it works for any segmentation method.
 - **Where and how fast it spread** (`fungus spread EXPERIMENT`): a map of when each point was first covered for good (in `--persistence` frames in a row, so a speck in one frame doesn't count), and the front's speed toward 8 directions (`--directions`), measured in a narrow ±5° wedge around each from the centre of the first patch, with standard errors. The ratio of fastest to slowest direction says whether the patch spreads evenly (1) or mainly one way (slope, water, wind, light). It writes `spread_map.png` (map + speed rose), `spread_by_direction.csv`, `spread.json` and `arrival_time.npy` for your own analysis. 0° = right and 90° = up in the image; with rectification, in the plane of the markers. On a synthetic patch spreading three times faster one way, it recovered each direction's speed within 10%.
 - **Reports and validation:** `report` writes `results/report/<plot>/` for each plot. `validate --make-template` writes one row per plot per frame, and `--plot` restricts the check to one plot, e.g. to compare areas with outlines traced by hand in ImageJ.

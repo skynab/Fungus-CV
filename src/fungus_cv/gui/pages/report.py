@@ -62,6 +62,9 @@ class ReportPage(QWidget):
         self.daily.addItems(["every frame", "median", "mean", "p90"])
         self.daily.setToolTip("One value per day from its frames (p90 = 90th percentile, "
                               "usual for greenness).")
+        self.covariate = QComboBox()
+        self.covariate.setToolTip("Draw a logged covariate (fungus covariates import) under "
+                                  "the measurement and summarise it over the fitted period.")
         self.include_flagged = QCheckBox("Fit flagged frames too")
         self.exclude_jumps = QCheckBox("Leave jumps out of the fits")
         self.vector = QCheckBox("Also save PDF and SVG (for papers)")
@@ -76,6 +79,7 @@ class ReportPage(QWidget):
         form.addRow("Time unit", self.time_unit)
         form.addRow("Hours of the day", self.hours)
         form.addRow("Per day", self.daily)
+        form.addRow("Conditions", self.covariate)
         form.addRow("", self.include_flagged)
         form.addRow("", self.exclude_jumps)
         form.addRow("", self.vector)
@@ -125,6 +129,8 @@ class ReportPage(QWidget):
         self.sensitivity_view = ImageView()
         self.tabs.addTab(self.spread_view, "Spread")
         self.tabs.addTab(self.sensitivity_view, "Sensitivity")
+        self.covariate_view = ImageView()
+        self.tabs.addTab(self.covariate_view, "Conditions")
 
         left = QVBoxLayout()
         left.addWidget(options)
@@ -147,6 +153,8 @@ class ReportPage(QWidget):
         exp = self.state.experiment
         self.plot.clear()
         self.metric.clear()
+        self.covariate.clear()
+        self.covariate.addItem("(none)")
         self.make_btn.setEnabled(False)
         for button in self.extra_buttons:
             button.setEnabled(False)
@@ -163,6 +171,9 @@ class ReportPage(QWidget):
             self.message.setText("No analysis results yet: run Analyze first.")
             return
         self.plot.addItems(plots)
+        from fungus_cv.analyze import covariates
+
+        self.covariate.addItems(covariates.load(exp).names)
         available = [m for m in METRICS if m.startswith("edge_advance")
                      or any(r.get(m, "") != "" for r in rows[:50])]
         available += [c for c in (rows[0] if rows else {})  # colour classes
@@ -198,6 +209,8 @@ class ReportPage(QWidget):
             results_dir=self.state.results_dir(),
             hours=hours,
             daily=None if self.daily.currentIndex() == 0 else self.daily.currentText(),
+            covariates=() if self.covariate.currentIndex() <= 0
+            else (self.covariate.currentText(),),
         )
         self.make_btn.setEnabled(False)
         self.message.setText("Fitting models and drawing charts…")
@@ -240,6 +253,11 @@ class ReportPage(QWidget):
                 self.chart.set_image(cv2.imread(name))
             elif name.endswith("quality_checks.png"):
                 self.quality.set_image(cv2.imread(name))
+            elif name.endswith("covariates.png"):
+                self.covariate_view.set_image(cv2.imread(name))
+        for name, c in result.covariates.items():
+            self.message.setText(self.message.text() + f" {name}: mean {c['mean']:.3g} "
+                                 f"(logged for {100 * c['coverage']:.0f}% of the period).")
         self.tabs.setCurrentIndex(0)
 
     # --- spread, sensitivity, shareable page ---------------------------------------------

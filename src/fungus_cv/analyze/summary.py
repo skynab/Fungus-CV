@@ -156,7 +156,8 @@ def make_summary(experiment: Experiment, metric: str | None = None,
                  exclude_flags: tuple[str, ...] = DEFAULT_EXCLUDE, exclude_jumps: bool = False,
                  time_to: tuple[float, ...] = (), seed: int = 0,
                  hours: tuple[float, float] | None = None,
-                 daily: str | None = None) -> SummaryResult:
+                 daily: str | None = None,
+                 covariates: tuple[str, ...] | None = None) -> SummaryResult:
     results_dir = Path(results_dir) if results_dir else experiment.root / "results"
     if not (results_dir / MEASUREMENTS_NAME).exists():
         raise FileNotFoundError(f"{results_dir / MEASUREMENTS_NAME} not found; "
@@ -169,6 +170,10 @@ def make_summary(experiment: Experiment, metric: str | None = None,
     run_info = json.loads(run_info_path.read_text(encoding="utf-8")) \
         if run_info_path.exists() else {}
     plots = list_plots(experiment, results_dir)
+    if covariates is None:  # every covariate the experiment has
+        from fungus_cv.analyze import covariates as covariates_module
+
+        covariates = tuple(covariates_module.load(experiment).names)
 
     body = [f"<h1>{_e(cfg.name)}</h1>"]
     if cfg.description:
@@ -196,7 +201,7 @@ def make_summary(experiment: Experiment, metric: str | None = None,
                                  bootstrap=bootstrap, exclude_flags=exclude_flags,
                                  exclude_jumps=exclude_jumps, results_dir=results_dir,
                                  time_to=time_to, seed=seed, formats=("png",),
-                                 hours=hours, daily=daily)
+                                 hours=hours, daily=daily, covariates=covariates)
         except (ValueError, RuntimeError) as exc:
             result.problems.append(f"{plot}: {exc}")
             body.append(f"<h2>{_e(plot)}</h2><p class=warn>Not fitted: {_e(exc)}</p>")
@@ -209,6 +214,15 @@ def make_summary(experiment: Experiment, metric: str | None = None,
         for png in (p for p in map(Path, report.files) if p.suffix == ".png"):
             body.append(_image(png, png.stem))
         body.append(_fits_table(report))
+        if report.covariates:
+            body.append("<h3>Conditions over the fitted period</h3><div class=scroll><table>"
+                        "<tr><th>Covariate</th><th>Mean</th><th>Min</th><th>Max</th>"
+                        "<th>Logged</th></tr>" + "".join(
+                            f"<tr><td>{_e(k)}</td><td class=num>{_num(v['mean'])}</td>"
+                            f"<td class=num>{_num(v['min'])}</td>"
+                            f"<td class=num>{_num(v['max'])}</td>"
+                            f"<td class=num>{100 * v['coverage']:.0f}%</td></tr>"
+                            for k, v in report.covariates.items()) + "</table></div>")
         body.append(_left_out(report_dir))
         body.append("</section>")
 

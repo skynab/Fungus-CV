@@ -246,6 +246,7 @@ The file lists each experiment (or field plot) with its `condition`, an optional
 | `conditions.csv` | per condition and parameter: n, mean, SD, SE, t-based 95% CI, median, range; random-effects (DerSimonian–Laird) mean using each replicate's own uncertainty, with between-replicate SD τ and I² |
 | `comparisons.csv` | each condition vs the reference (or all pairs): difference with 95% CI, Welch's t, df, p, Holm-adjusted p (within each parameter), Hedges' g |
 | `model_selection.csv` | AICc and Akaike weights per replicate, and summed over replicates |
+| `covariate_effects.csv` | with `covariates:`, each parameter's slope on each covariate with 95% CI and p, alone and adjusted for condition |
 | `data_long.csv` | every frame of every replicate in long format, for R or Python |
 | `curves.png/.svg`, `parameters.png/.svg` | replicate data and fits with condition means; parameter estimates by condition |
 | `study.json` | everything above plus the software version and git commit |
@@ -257,6 +258,28 @@ The file lists each experiment (or field plot) with its `condition`, an optional
 - **Too few replicates:** a condition with fewer than 2 usable replicates gets no SD or test.
 
 With 2–3 replicates per condition a t-test has little power. Report the estimates and confidence intervals, not only p-values.
+
+### Temperature, humidity and other conditions
+
+Growth of fungi and moss depends strongly on temperature and moisture. A difference between replicates, or between conditions, may therefore be the weather. Log the conditions next to the camera and bring them in:
+
+```bash
+fungus covariates import experiments/moss-1 logger.csv      # merged into covariates.csv
+fungus covariates list experiments/moss-1
+fungus report experiments/moss-1 --covariate temperature_c  # drawn under the growth curve
+```
+
+- **Logger files** are read as they come:
+  - ISO times, day-first or month-first dates, and separate `Date` and `Time` columns;
+  - comma, semicolon or tab separators, and decimal commas;
+  - a title line above the header.
+- **Times without a zone** are taken as the experiment's `timezone`. A date such as 03/04 that could be day-first or month-first is refused with a hint rather than guessed; pass `--time-format '%d/%m/%Y %H:%M'`.
+- **Column names** are simplified: `Temperature (°C)` becomes `temperature_c`, and text columns such as a serial number are skipped. `--prefix soil_` keeps two loggers apart.
+- **Reading a value at any time** interpolates linearly between readings, but never across a gap longer than 3 logging intervals.
+- `report --covariate` writes `covariates.png` and the covariate's time-weighted mean, min and max over the fitted period, with how much of it the log covers. `summary` includes every covariate the experiment has, and the app's Report page has a Conditions choice.
+- **In a study,** list them: `covariates: [temperature_c]`. Each replicate gets the covariate's mean over its fitted period, and every compared parameter is related to it by **random-effects meta-regression**. The between-replicate variance is estimated by the method of moments, and the slope's interval uses Knapp–Hartung standard errors with a t distribution. That choice keeps the 95% interval honest with few replicates: in a simulation with 6 replicates it covered the true slope 93–99.5% of the time.
+- **Confounding:** with several conditions, the slope is also reported **adjusted for condition**. If the treated replicates happened to be warmer, the unadjusted slope mixes the two effects; the adjusted one doesn't.
+- **Warnings:** a log covering less than 80% of a replicate's fitted period triggers one.
 
 ### How many replicates?
 

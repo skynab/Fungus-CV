@@ -667,6 +667,9 @@ def report(
                                      "Uses the experiment's timezone."),
     daily: str | None = typer.Option(None, help="One value per day from its frames: median, "
                                      "mean or p90 (90th percentile, as for greenness)."),
+    covariate: list[str] = typer.Option([], help="Plot this covariate (e.g. temperature_c) "
+                                        "under the measurement and summarise it over the "
+                                        "fitted period (repeatable)."),
 ) -> None:
     """Fit growth models and write plots to results/report/ (one folder per field plot)."""
     from fungus_cv.analyze.fit import (
@@ -714,6 +717,7 @@ def report(
             formats=tuple(figure_format) or DEFAULT_FORMATS, dpi=dpi, time_to=tuple(time_to),
             bootstrap=bootstrap, errors=errors,
             hours=parse_hours(hours) if hours else None, daily=daily,
+            covariates=tuple(covariate),
         ) for name in plots]
     except (FileNotFoundError, ValueError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
@@ -731,6 +735,9 @@ def report(
                    f"{result.jumps} jump(s) to check (see frame_flags.csv); "
                    f"time in {result.time_unit}")
         best_model = best_fit(result.fits)
+        for name, c in result.covariates.items():
+            typer.echo(f"  {name}: mean {c['mean']:.4g} (min {c['min']:.4g}, max {c['max']:.4g})"
+                       f" over the fitted period; logged for {100 * c['coverage']:.0f}% of it")
         if result.fits and result.fits[0].bootstrap:
             b = result.fits[0].bootstrap
             typer.echo(f"  parameters: estimate ± SE [95% bootstrap interval, {b['n']} refits]")
@@ -1838,6 +1845,58 @@ def label(
         raise typer.Exit(1) from exc
     typer.echo(f"Saved {counts['saved']} item(s); "
                f"{sum(i.reviewed for i in ds.items)}/{len(ds.items)} reviewed")
+
+
+covariates_app = typer.Typer(help="Environmental covariates (temperature, humidity, ...) "
+                             "from a data logger.", no_args_is_help=True)
+app.add_typer(covariates_app, name="covariates")
+
+
+@covariates_app.command("import")
+def covariates_import(
+    experiment: Path = typer.Argument(..., help="Experiment folder."),
+    log: Path = typer.Argument(..., help="The logger's CSV file."),
+    time_column: str | None = typer.Option(None, help="Column with the time; 'Date,Time' "
+                                           "for two columns. Default: found by name."),
+    time_format: str | None = typer.Option(None, help="strptime format if the times are "
+                                           "not ISO, e.g. '%d/%m/%Y %H:%M'."),
+    column: list[str] = typer.Option([], help="Only these columns (repeatable)."),
+    prefix: str = typer.Option("", help="Put before every name, e.g. 'soil_'."),
+) -> None:
+    """Merge a logger file into the experiment's covariates.csv (times without a zone are
+    taken as the experiment's timezone)."""
+    from fungus_cv.analyze import covariates
+
+    exp = _load_experiment(experiment)
+    try:
+        summary = covariates.import_log(exp, log, time_column, time_format, list(column) or None,
+                                        prefix)
+    except (OSError, ValueError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    zone = exp.config.timezone or "this computer's time zone"
+    typer.echo(f"Imported {summary.rows} rows ({summary.first_utc} to {summary.last_utc}) of "
+               f"{', '.join(summary.columns)} into {summary.path}; times read as "
+               f"{summary.time_format}, local times in {zone}.")
+
+
+@covariates_app.command("list")
+def covariates_list(experiment: Path = typer.Argument(..., help="Experiment folder.")) -> None:
+    """The covariates an experiment has, with their range and logging interval."""
+    import numpy as np
+
+    from fungus_cv.analyze import covariates
+
+    exp = _load_experiment(experiment)
+    cov = covariates.load(exp)
+    if not cov.names:
+        typer.echo("No covariates yet: `fungus covariates import EXPERIMENT LOG.csv`.")
+        return
+    for name in cov.names:
+        t, v = cov.series(name)
+        step = float(np.median(np.diff(t))) / 60 if len(t) > 1 else float("nan")
+        typer.echo(f"{name}: {len(v)} readings, {v.min():.4g} to {v.max():.4g}, every "
+                   f"{step:.3g} min")
 
 
 models_app = typer.Typer(help="Trained models: list, inspect, profile.", no_args_is_help=True)

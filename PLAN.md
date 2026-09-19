@@ -107,7 +107,8 @@ fungus_cv/
                 coco.py, registry.py, profile.py, unet.py
   analyze/      pipeline.py, fit.py, report.py, study.py, suite.py, validate.py, compare.py,
                 sensitivity.py, archive.py, combine.py, exclusions.py, overlay.py,
-                spread.py, power.py, summary.py (shareable HTML page)
+                spread.py, power.py, summary.py (shareable HTML page),
+                covariates.py (logger import, meta-regression)
   gui/          main_window.py + pages/ (experiment, camera, capture, setup, prompt, analyze,
                 report, labels, train, study, validation, doctor)
   ui/           interactive.py (OpenCV click tools for the command line)
@@ -202,6 +203,7 @@ Everything below was added after the first plan, to make the results publishable
 | M15 ✅ | **Planning, model hygiene and a demo:** rates, lag and time-to-level with bootstrap intervals and 95% bands on the charts; `fungus power` (replicates needed, simulating the study's own Welch test); `fungus models` registry with `unfamiliar_input` drift warnings; resumable training with early stopping; `fungus demo` | Checked against theory and by simulation: band coverage 91–94% (independent errors), power matches the noncentral t, resumed training gives the same weights. The demo exposed and fixed a false "blurry" flag caused by growth itself |
 | M16 🟡 | **Spread maps, label exchange and multi-class models:** `fungus spread` (arrival-time map, front speed by direction with standard errors); COCO export/import for CVAT and Label Studio; one model for several overlapping classes (stem and moss) with per-class thresholds and metrics | Speeds by direction within 10% on a synthetic anisotropic patch; COCO run-length code byte-identical to pycocotools; a two-class model learns stem and moss on synthetic plants. Needs real moss on real stems to confirm the gain over two separate passes |
 | M17 🟡 | **Whole-field colour, sharing and app parity:** named colour classes (`pick-color --class`) give each plot's share of healthy / yellowing / brown per frame with an uncertainty from moving the class boundaries; `fungus summary` writes one self-contained HTML page; the app's Report page runs spread maps, sensitivity checks and the shareable page, and the Capture page watches run health | On a synthetic field browning at a steady rate through a lighting change, shares within 1.5 points of the truth and the fitted rate within 5%. Needs a real discolouring field (Target C) to confirm the classes hold across days and weather |
+| M18 🟡 | **Outdoor conditions:** `--hours` and `--daily` (one value per day with an honest uncertainty) for field series; environmental covariates imported from data loggers, drawn under the curves and related to growth parameters across replicates by random-effects meta-regression (alone and adjusted for condition) | Simulations: daily uncertainty covers the truth ~95%; the meta-regression interval covers the true slope 93–99.5% with 6 replicates; a synthetic study recovers a 0.1 %/day per °C effect. Needs a real logger file and a real outdoor run |
 | M14 🟡 | **Long runs and the field:** several cameras measured separately and combined, capture heartbeat + `fungus health` with webhook/command alerts, `fungus service install`, `fungus import --watch` for synced photos | An unattended field run reports its own problems *(code done; the service registration and webhook alerts are untested against a real OS service and a real endpoint)* |
 
 ---

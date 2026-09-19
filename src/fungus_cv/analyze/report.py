@@ -45,6 +45,8 @@ class ReportResult:
     fits: list[FitResult] = field(default_factory=list)
     outside_hours: int = 0  # frames left out for being outside the chosen hours
     daily: str | None = None  # the points are days, reduced with this statistic
+    # Environmental covariates over the fitted span: name -> mean, min, max, coverage.
+    covariates: dict = field(default_factory=dict)
     files: list[str] = field(default_factory=list)
 
 
@@ -418,6 +420,7 @@ def make_report(
     time_to: tuple[float, ...] = (),
     hours: tuple[float, float] | None = None,
     daily: str | None = None,
+    covariates: tuple[str, ...] = (),
 ) -> ReportResult:
     import matplotlib
 
@@ -432,6 +435,15 @@ def make_report(
     excluded, jump, retreat, use = series.excluded, series.jump, series.retreat, series.use
     t0_ts = series.t0_ts
     sigma = series.sigma
+    cov = None
+    if covariates:
+        from fungus_cv.analyze import covariates as covariates_module
+
+        cov = covariates_module.load(experiment)
+        missing = [c for c in covariates if c not in cov.names]
+        if missing:
+            raise ValueError(f"no covariate(s) {missing} in this experiment; have "
+                             f"{cov.names or 'none'} (import with `fungus covariates import`)")
     fits = fit_all(t[use], y[use], models=models, sigma=sigma, bootstrap=bootstrap,
                    errors=errors, seed=seed, levels=time_to)
 
@@ -448,6 +460,11 @@ def make_report(
         if (series.frames or series).outside_hours is not None else 0,
         daily=series.daily,
     )
+    framewise = series.frames or series
+    if cov is not None and framewise.use.any():
+        stamps = framewise.t0_ts + framewise.t[framewise.use] * TIME_UNITS[time_unit]
+        result.covariates = {name: cov.summarize(name, float(stamps.min()), float(stamps.max()))
+                             for name in covariates}
 
     # Every frame's flags in one place, so exclusions can be audited.
     flags_csv = out_dir / "frame_flags.csv"
@@ -558,6 +575,9 @@ def make_report(
     fig.tight_layout()
     result.files += save_figure(fig, out_dir, "quality_checks", formats, dpi)
 
+    if cov is not None:
+        result.files += _covariate_figure(series, cov, covariates, label, out_dir, formats, dpi)
+
     # --- residuals of the best model, in units of the reported uncertainty ------------
     best = best_fit(fits)
     if best is not None and use.sum() > 2:
@@ -603,6 +623,7 @@ def make_report(
         "hours": list(hours) if hours else None,
         "timezone": experiment.config.timezone or "this computer's",
         "daily": daily,
+        "covariates": result.covariates,
         "weighted_by_uncertainty": sigma is not None,
         "model_selection": "AICc; akaike_weight = relative likelihood among the fitted models",
         "fits": [f.to_dict() for f in fits],
@@ -617,6 +638,36 @@ def make_report(
                        mp4, fps):
             result.files.append(mp4)
     return result
+
+
+def _covariate_figure(series: Series, cov, names, label: str, out_dir: Path, formats,
+                      dpi: int) -> list[Path]:
+    """The measurement with each covariate underneath, on the same time axis."""
+    import matplotlib.pyplot as plt
+
+    unit = TIME_UNITS[series.time_unit]
+    frames = series.frames or series
+    start = frames.t0_ts + frames.t.min() * unit
+    end = frames.t0_ts + frames.t.max() * unit
+    fig, axes = plt.subplots(1 + len(names), 1, figsize=(8, 2.6 + 1.8 * len(names)), dpi=dpi,
+                             sharex=True, height_ratios=[2] + [1] * len(names))
+    top = axes[0]
+    _style(top)
+    top.plot(series.t[series.use], series.y[series.use], "o", ms=4, color=INK_2)
+    top.set_ylabel(label, color=INK)
+    top.set_title("Measurement and conditions", color=INK, loc="left", fontsize=12)
+    for ax, name, color in zip(axes[1:], names, SERIES[1:] + SERIES):
+        _style(ax)
+        t, v = cov.series(name)
+        inside = (t >= start) & (t <= end)
+        tt = (t[inside] - series.t0_ts) / unit
+        # Break the line at logging gaps rather than drawing across them.
+        vv = cov.at(name, t[inside])
+        ax.plot(tt, vv, color=color, lw=1.5)
+        ax.set_ylabel(name, color=INK, fontsize=9)
+    axes[-1].set_xlabel(f"Time since start ({series.time_unit})", color=INK)
+    fig.tight_layout()
+    return save_figure(fig, out_dir, "covariates", formats, dpi)
 
 
 def save_figure(fig, out_dir: Path, stem: str, formats=DEFAULT_FORMATS,

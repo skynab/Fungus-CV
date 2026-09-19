@@ -83,6 +83,9 @@ class Study(BaseModel):
     exclude_jumps: bool = False
     hours: str | None = None  # e.g. "10-14": only frames taken then (local time), for outdoors
     daily: str | None = None  # median | mean | p90: one value per day
+    # Environmental covariates (from each experiment's covariates.csv): their mean over each
+    # replicate's fitted span is related to every compared parameter by meta-regression.
+    covariates: list[str] = Field(default_factory=list)
     bootstrap: int = Field(1000, ge=0)
     errors: str = "auto"  # auto | iid | ar1: are frame errors correlated in time?
     seed: int = 0
@@ -230,6 +233,7 @@ class Replicate:
     settings_hash: str = ""
     settings: dict = field(default_factory=dict)
     error: str | None = None
+    covariates: dict = field(default_factory=dict)  # name -> mean/min/max/coverage
 
     @property
     def fit(self) -> FitResult | None:
@@ -260,6 +264,7 @@ class StudyResult:
     warnings: list[str]
     out_dir: Path
     files: list[Path] = field(default_factory=list)
+    covariate_effects: list[dict] = field(default_factory=list)
 
 
 def _run_settings(experiment_root: Path, settings_hash: str) -> dict:
@@ -383,10 +388,65 @@ def run_study(study_path: Path, out_dir: Path | None = None) -> StudyResult:
         comparisons.extend(rows)
 
     model_selection = _model_selection(loaded, models)
+    effects = _covariate_effects(study, loaded, condition_names, warnings)
     result = StudyResult(study, metric, time_unit, replicates, conditions, comparisons,
-                         model_selection, warnings, out_dir)
+                         model_selection, warnings, out_dir, covariate_effects=effects)
     write_study(result)
     return result
+
+
+def _covariate_effects(study: Study, loaded: list[Replicate], condition_names: list[str],
+                       warnings: list[str]) -> list[dict]:
+    """Each covariate's mean over each replicate's fitted span, then a random-effects
+    meta-regression of every compared parameter on it (and, with several conditions, the
+    same adjusted for condition)."""
+    if not study.covariates:
+        return []
+    from fungus_cv.analyze import covariates as covariates_module
+
+    for rep in loaded:
+        if rep.fit is None:
+            continue
+        frames = rep.series.frames or rep.series
+        stamps = frames.t0_ts + frames.t[frames.use] * TIME_UNITS[frames.time_unit]
+        cov = covariates_module.load(Experiment(rep.experiment))
+        for name in study.covariates:
+            where = f"{rep.condition}/{rep.replicate}"
+            if name not in cov.names:
+                warnings.append(f"{where}: no covariate {name!r} (have {cov.names or 'none'})")
+                rep.covariates[name] = {"mean": math.nan, "min": math.nan, "max": math.nan,
+                                        "coverage": 0.0}
+                continue
+            summary = cov.summarize(name, float(stamps.min()), float(stamps.max()))
+            rep.covariates[name] = summary
+            if summary["coverage"] < 0.8:
+                warnings.append(f"{where}: the {name} log covers only "
+                                f"{100 * summary['coverage']:.0f}% of the fitted span")
+    rows = []
+    fitted = [r for r in loaded if r.fit is not None]
+    for name in study.covariates:
+        for param in study.compared_params:
+            reps = [r for r in fitted if math.isfinite(r.fit.value(param))
+                    and math.isfinite(r.covariates.get(name, {}).get("mean", math.nan))]
+            y = [r.fit.value(param) for r in reps]
+            se = [r.param_se(param) for r in reps]
+            x = [r.covariates[name]["mean"] for r in reps]
+            adjustments = [("none", None)]
+            if len({r.condition for r in reps}) > 1:
+                adjustments.append(("condition", [r.condition for r in reps]))
+            for adjusted, groups in adjustments:
+                out = covariates_module.meta_regression(y, se, x, groups)
+                if not math.isfinite(out["slope"]):
+                    warnings.append(f"{param} vs {name}"
+                                    + (" (adjusted for condition)" if groups else "")
+                                    + ": too few replicates or no spread in the covariate")
+                rows.append({"param": param, "covariate": name, "adjusted_for": adjusted,
+                             "n": out["n"], "slope": out["slope"], "slope_se": out["slope_se"],
+                             "ci_low": out["ci_low"], "ci_high": out["ci_high"],
+                             "p": out["p"], "df": out["df"], "tau": out["tau"],
+                             "weighted": out["weighted"], "covariate_min": out["x_range"][0],
+                             "covariate_max": out["x_range"][1]})
+    return rows
 
 
 def _model_selection(replicates: list[Replicate], models: tuple[str, ...]) -> list[dict]:
@@ -457,6 +517,10 @@ def replicate_rows(result: StudyResult) -> list[dict]:
             "durbin_watson": fit.durbin_watson if fit else math.nan,
             "warnings": " | ".join(fit.warnings) if fit else "",
         })
+        for name in result.study.covariates:
+            summary = rep.covariates.get(name, {})
+            for key in ("mean", "min", "max", "coverage"):
+                row[f"{name}_{key}"] = summary.get(key, math.nan)
         rows.append(row)
     return rows
 
@@ -470,11 +534,13 @@ def write_study(result: StudyResult) -> None:
         "conditions": out / "conditions.csv",
         "comparisons": out / "comparisons.csv",
         "model_selection": out / "model_selection.csv",
+        "covariate_effects": out / "covariate_effects.csv",
     }
     _write_csv(files["replicates"], replicate_rows(result))
     _write_csv(files["conditions"], result.conditions)
     _write_csv(files["comparisons"], result.comparisons)
     _write_csv(files["model_selection"], result.model_selection)
+    _write_csv(files["covariate_effects"], result.covariate_effects)
     result.files = [p for p in files.values() if p.exists()]
 
     # Long format: every used frame of every replicate, for plotting or modelling elsewhere.
@@ -505,6 +571,7 @@ def write_study(result: StudyResult) -> None:
         } for r in result.replicates],
         "conditions": result.conditions, "comparisons": result.comparisons,
         "model_selection": result.model_selection,
+        "covariate_effects": result.covariate_effects,
     }
     study_json = out / "study.json"
     study_json.write_text(json.dumps(json_safe(summary), indent=2), "utf-8")
@@ -586,7 +653,8 @@ def methods_text(result: StudyResult) -> str:
         + ("Each condition was compared with "
            f"{study.reference}" if study.reference else "All pairs of conditions were compared")
         + " using Welch's t-test; p-values were Holm-adjusted within each parameter, and "
-        "effect sizes are Hedges' g.",
+        "effect sizes are Hedges' g."
+        + _covariate_text(study),
         "",
         "Replicates:",
         "",
@@ -600,6 +668,18 @@ def methods_text(result: StudyResult) -> str:
         lines += ["", "Warnings to resolve before publishing:", ""]
         lines += [f"- {w}" for w in result.warnings]
     return "\n".join(lines) + "\n"
+
+
+def _covariate_text(study: Study) -> str:
+    if not study.covariates:
+        return ""
+    names = ", ".join(study.covariates)
+    return (f" The environmental covariate(s) {names} were averaged over each replicate's "
+            "fitted period (time-weighted, interpolated between logged readings), and each "
+            "parameter was related to them by random-effects meta-regression (method-of-"
+            "moments between-replicate variance; Knapp-Hartung standard errors, truncated at "
+            "1, with a t distribution on k - p degrees of freedom), alone and, with several "
+            "conditions, adjusted for condition (covariate_effects.csv).")
 
 
 def _daily_text(study: Study) -> str:

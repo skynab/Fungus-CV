@@ -166,6 +166,7 @@ def preload_modules() -> None:
     import scipy.stats  # noqa: F401
 
     import fungus_cv.analyze.compare  # noqa: F401
+    import fungus_cv.analyze.covariates  # noqa: F401
     import fungus_cv.analyze.exclusions  # noqa: F401
     import fungus_cv.analyze.fit  # noqa: F401
     import fungus_cv.analyze.overlay  # noqa: F401

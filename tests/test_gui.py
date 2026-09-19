@@ -744,3 +744,15 @@ def test_report_page_hours_and_daily(window, qtbot, tmp_path):
     qtbot.waitUntil(lambda: report.result is not None, timeout=60000)
     assert report.result.daily == "median" and report.result.n_used == 4
     assert "4 days (daily median) used" in report.message.text()
+
+    from .test_covariates import warm_log
+
+    warm_log(exp, 18.0, days=4)
+    report.refresh()
+    report.metric.setCurrentText("coverage_pct")
+    report.covariate.setCurrentText("temperature_c")
+    report.result = None
+    report.make()
+    qtbot.waitUntil(lambda: report.result is not None, timeout=60000)
+    assert "temperature_c: mean" in report.message.text()
+    assert report.covariate_view._has_image

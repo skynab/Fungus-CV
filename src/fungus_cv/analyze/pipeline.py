@@ -52,6 +52,7 @@ MEASUREMENT_FIELDS = [
     "equivalent_radius_mm",
     "gcc_mean", "gcc_p90", "rcc_mean", "exg_mean",
     "mean_brightness", "sharpness", "light_gain_b", "light_gain_g", "light_gain_r",
+    "model_input_distance",
     "flags", "mask_file", "overlay_file",
 ]
 
@@ -578,6 +579,13 @@ class Analyzer:
         exp = self.experiment
         alignment = prepared.alignment
         frame_flags, frame_info = self._frame_flags(prepared)
+        # Trained models: how far this frame is from what the model was trained on.
+        familiarity = (self.segmenter.input_distance(prepared.frame)
+                       if hasattr(self.segmenter, "input_distance") else None)
+        if familiarity is not None:
+            frame_info["model_input_distance"] = _fmt(familiarity[0], 2)
+            if familiarity[1]:
+                frame_flags.append("unfamiliar_input")
         stem = Path(frame_row["file"]).stem
         mask_file = overlay_file = ""
         if self.cfg.save_masks:

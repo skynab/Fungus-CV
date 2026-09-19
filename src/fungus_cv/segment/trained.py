@@ -83,6 +83,19 @@ class TrainedModelSegmenter:
                  for x in thresholds]
         return masks[0], masks[1:]
 
+    def input_distance(self, image: np.ndarray) -> tuple[float, bool] | None:
+        """How unlike the training images this frame's region is (None without a profile)."""
+        from fungus_cv.learn.profile import image_distance, is_unfamiliar
+
+        profile = self._loaded().card.get("input_profile")
+        if not profile:
+            return None
+        h, w = image.shape[:2]
+        window = (CropWindow.around(self.roi, self.crop_margin_px, w, h) if self.roi
+                  else CropWindow.full(w, h))
+        value = image_distance(profile, window.crop(image))
+        return value, is_unfamiliar(profile, value)
+
     def describe(self) -> dict:
         loaded = self._loaded()
         return {

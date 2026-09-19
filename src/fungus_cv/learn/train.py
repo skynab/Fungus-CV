@@ -51,6 +51,8 @@ class TrainConfig:
     device: str = "auto"
     tile_px: int = 512
     overlap_px: int = 64
+    # Stop when validation IoU hasn't improved for this many evaluations (0 = never).
+    patience: int = 0
 
     @classmethod
     def with_color_jitter(cls, scale: float = 1.0, **fields) -> TrainConfig:
@@ -146,7 +148,26 @@ def _loss(logits, target, torch):
 
 
 class TrainingCancelled(RuntimeError):
-    """Raised when ``should_stop`` asks training to stop; nothing is saved."""
+    """Raised when ``should_stop`` asks training to stop; no model is written, but the last
+    checkpoint stays so the run can be resumed."""
+
+
+CHECKPOINT_NAME = "checkpoint.pt"
+# Settings that may differ when resuming (they don't change what is learned).
+RESUME_MAY_DIFFER = ("device", "patience")
+
+
+def _checkpoint(net, optimizer, scheduler, sampler, torch, step, history, best_iou,
+                best_state, stale, cfg) -> dict:
+    return {
+        "step": step, "history": history, "best_iou": best_iou, "best_state": best_state,
+        "stale": stale, "config": asdict(cfg),
+        "net": {k: v.detach().cpu() for k, v in net.state_dict().items()},
+        "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+        "sampler_rng": sampler.rng.bit_generator.state,
+        "torch_rng": torch.get_rng_state(), "python_rng": random.getstate(),
+        "numpy_rng": np.random.get_state(),
+    }
 
 
 @dataclass
@@ -159,6 +180,7 @@ class TrainResult:
     n_val: int
     split: str
     seconds: float
+    stopped_early_at: int | None = None
 
 
 def _seed(seed: int, torch) -> None:
@@ -201,15 +223,25 @@ def tune_threshold(probs: list[np.ndarray], truths: list[np.ndarray]) -> tuple[f
 
 
 def train(dataset: Dataset, out_dir: Path, cfg: TrainConfig, progress=None,
-          should_stop=None) -> TrainResult:
+          should_stop=None, resume: bool = False) -> TrainResult:
     """``progress(entry)`` gets each evaluation's loss and validation IoU; ``should_stop()``
-    is checked every step and cancels training (raising ``TrainingCancelled``)."""
+    is checked every step and cancels training (raising ``TrainingCancelled``).
+
+    A checkpoint is written at every evaluation. ``resume=True`` continues an interrupted run
+    from it, with the same random state, so the result matches an uninterrupted run.
+    """
     torch = import_torch()
     from fungus_cv.learn.unet import ResNetUNet
 
     out_dir = Path(out_dir)
     if (out_dir / WEIGHTS_NAME).exists():
         raise FileExistsError(f"{out_dir} already contains a model; choose a new folder")
+    checkpoint_path = out_dir / CHECKPOINT_NAME
+    if checkpoint_path.exists() and not resume:
+        raise FileExistsError(f"{out_dir} holds an interrupted run: resume it (--resume) or "
+                              "choose a new folder")
+    if resume and not checkpoint_path.exists():
+        raise FileNotFoundError(f"no interrupted run to resume in {out_dir}")
     items = dataset.selected(cfg.reviewed_only)
     if not items:
         hint = " (none are marked reviewed; use `fungus label` or --include-unreviewed)" \
@@ -232,13 +264,32 @@ def train(dataset: Dataset, out_dir: Path, cfg: TrainConfig, progress=None,
 
     out_dir.mkdir(parents=True, exist_ok=True)
     best_iou, best_state, history = -1.0, None, []
+    stale, first_step, stopped_early = 0, 1, None
+    if resume:
+        saved = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        changed = [k for k, v in asdict(cfg).items()
+                   if k not in RESUME_MAY_DIFFER and saved["config"].get(k) != v]
+        if changed:
+            raise ValueError(f"settings differ from the interrupted run ({', '.join(changed)}); "
+                             "resume with the same settings")
+        net.load_state_dict(saved["net"])
+        optimizer.load_state_dict(saved["optimizer"])
+        scheduler.load_state_dict(saved["scheduler"])
+        sampler.rng.bit_generator.state = saved["sampler_rng"]
+        torch.set_rng_state(saved["torch_rng"])
+        random.setstate(saved["python_rng"])
+        np.random.set_state(saved["numpy_rng"])
+        best_iou, best_state, history = saved["best_iou"], saved["best_state"], saved["history"]
+        stale, first_step = saved["stale"], saved["step"] + 1
+        log.info("resuming at step %d of %d", first_step, cfg.steps)
     started = time.time()
     net.train()
     running = 0.0
-    for step in range(1, cfg.steps + 1):
+    for step in range(first_step, cfg.steps + 1):
         if should_stop and should_stop():
-            raise TrainingCancelled(f"training cancelled after {step - 1} of {cfg.steps} steps; "
-                                    "nothing was saved")
+            raise TrainingCancelled(
+                f"training cancelled after {step - 1} of {cfg.steps} steps; no model written"
+                + (", resume it with --resume" if checkpoint_path.exists() else ""))
         x, y = _batch(sampler, cfg.batch_size, torch, device)
         loss = _loss(net(x), y, torch)
         optimizer.zero_grad(set_to_none=True)
@@ -255,13 +306,22 @@ def train(dataset: Dataset, out_dir: Path, cfg: TrainConfig, progress=None,
                 rows, _ = _evaluate(net, val_items, dataset, cfg, device)
                 entry["val_iou"] = summarize(rows)["iou_mean"]
                 if entry["val_iou"] > best_iou:
-                    best_iou = entry["val_iou"]
+                    best_iou, stale = entry["val_iou"], 0
                     best_state = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
+                else:
+                    stale += 1
             history.append(entry)
             log.info("step %d/%d  loss %.4f%s", step, cfg.steps, entry["loss"],
                      f"  val IoU {entry['val_iou']:.4f}" if "val_iou" in entry else "")
             if progress:
                 progress(entry)
+            torch.save(_checkpoint(net, optimizer, scheduler, sampler, torch, step, history,
+                                   best_iou, best_state, stale, cfg), checkpoint_path)
+            if cfg.patience and val_items and stale >= cfg.patience and step < cfg.steps:
+                stopped_early = step
+                log.info("validation IoU has not improved for %d evaluations: stopping at "
+                         "step %d", stale, step)
+                break
 
     if best_state is None:  # no validation data: keep the final weights
         best_state = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
@@ -296,12 +356,20 @@ def train(dataset: Dataset, out_dir: Path, cfg: TrainConfig, progress=None,
                                "the best checkpoint, so confirm on separate data with "
                                "`fungus evaluate`"},
         "training": {"config": asdict(cfg), "history": history, "seconds": round(seconds, 1),
+                     "stopped_early_at_step": stopped_early, "resumed": resume,
                      "device": str(device), "torch": torch.__version__,
                      "python": platform.python_version(), "platform": platform.platform()},
     }
+    from fungus_cv.learn.profile import build_profile
+
+    try:  # what the training images look like, to flag frames unlike them later
+        card["input_profile"] = build_profile(dataset.load_image(i) for i in train_items)
+    except ValueError as exc:
+        log.warning("no input profile: %s", exc)
     (out_dir / CARD_NAME).write_text(json.dumps(card, indent=2), encoding="utf-8")
+    checkpoint_path.unlink(missing_ok=True)  # the run finished; the model is the result
     return TrainResult(out_dir, best_iou if val_items else None, threshold, val_metrics,
-                       len(train_items), len(val_items), split, seconds)
+                       len(train_items), len(val_items), split, seconds, stopped_early)
 
 
 def evaluate_model(model_dir: Path, dataset: Dataset, reviewed_only: bool = True,

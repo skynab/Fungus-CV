@@ -1602,6 +1602,85 @@ def label(
                f"{sum(i.reviewed for i in ds.items)}/{len(ds.items)} reviewed")
 
 
+models_app = typer.Typer(help="Trained models: list, inspect, profile.", no_args_is_help=True)
+app.add_typer(models_app, name="models")
+
+
+@models_app.command("list")
+def models_list(
+    folders: list[Path] = typer.Argument(None, help="Where to look (default: ./models)."),
+) -> None:
+    """Every trained model under the folders, newest first, with how well it did."""
+    from fungus_cv.learn.registry import find_models
+
+    roots = folders or [Path("models")]
+    found = find_models(roots)
+    if not found:
+        typer.echo(f"No trained models under {', '.join(map(str, roots))}.")
+        return
+    for m in found:
+        val = f"val IoU {m.val_iou:.3f}" if m.val_iou is not None else "no validation"
+        evals = "; ".join(f"{name}: IoU {e['iou']:.3f} (n={e['n']}"
+                          f"{', unseen' if e['unseen'] else ''})"
+                          for name, e in m.evaluations.items())
+        typer.echo(f"{m.name:24s} {m.created_utc[:10]}  {m.encoder:8s} dataset {m.dataset} "
+                   f"({m.fingerprint}, {m.n_train} train / {m.n_val} val)  {val}"
+                   + ("" if m.has_profile else "  [no input profile]"))
+        if evals:
+            typer.echo(f"{'':24s} evaluated on {evals}")
+
+
+@models_app.command("show")
+def models_show(model: Path = typer.Argument(..., help="Model folder.")) -> None:
+    """The card of one model: data, training, validation, input profile."""
+    from fungus_cv.learn.registry import read_model
+
+    try:
+        m = read_model(model)
+    except (OSError, ValueError, KeyError) as exc:
+        typer.secho(f"{model}: not a model folder ({exc})", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    card = m.card
+    training = card.get("training", {})
+    typer.echo(f"{m.name}  ({m.path})")
+    typer.echo(f"  created {m.created_utc} with fungus-cv {card.get('fungus_cv_version', '?')}")
+    typer.echo(f"  {m.encoder} U-Net, threshold {m.threshold}")
+    typer.echo(f"  dataset {m.dataset} ({card.get('dataset', {}).get('path', '')}), "
+               f"fingerprint {m.fingerprint}; split: {card.get('dataset', {}).get('split', '')}")
+    typer.echo(f"  {m.n_train} training / {m.n_val} validation items, "
+               f"{training.get('seconds', 0) / 60:.1f} min on {training.get('device', '?')}")
+    if m.val_iou is not None:
+        typer.echo(f"  validation IoU {m.val_iou:.4f} (optimistic: validation picked the "
+                   "checkpoint)")
+    for name, e in m.evaluations.items():
+        typer.echo(f"  evaluated on {name}: IoU {e['iou']:.4f} over {e['n']} "
+                   f"{'unseen ' if e['unseen'] else ''}item(s)")
+    profile = card.get("input_profile")
+    if profile:
+        typer.echo(f"  input profile of {profile['n']} training images: frames further than "
+                   f"{profile['limit']:.1f} are flagged unfamiliar_input")
+    else:
+        typer.echo("  no input profile: add one with `fungus models profile`")
+
+
+@models_app.command("profile")
+def models_profile(
+    model: Path = typer.Argument(..., help="Model folder."),
+    dataset: Path = typer.Argument(..., help="The dataset it was trained on."),
+) -> None:
+    """Add an input profile to a model trained before profiles existed."""
+    from fungus_cv.learn.dataset import Dataset
+    from fungus_cv.learn.registry import add_profile
+
+    try:
+        profile = add_profile(model, Dataset.open(dataset))
+    except (OSError, ValueError, KeyError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Added a profile of {profile['n']} training images to {model}; frames further "
+               f"than {profile['limit']:.1f} will be flagged unfamiliar_input.")
+
+
 @app.command("train")
 def train_cmd(
     dataset: Path = typer.Argument(..., help="Dataset folder."),
@@ -1620,6 +1699,9 @@ def train_cmd(
                                        "(0 = none, 2 = double)."),
     pretrained: bool = typer.Option(True, help="Start from ImageNet weights."),
     device: str = typer.Option("auto", help="auto | cuda | mps | cpu"),
+    patience: int = typer.Option(0, help="Stop when validation IoU hasn't improved for this "
+                                 "many evaluations (0 = train all steps)."),
+    resume: bool = typer.Option(False, help="Continue an interrupted run in OUTPUT."),
     seed: int = typer.Option(0),
 ) -> None:
     """Train a segmentation model; writes model.pt and a model.json card."""
@@ -1637,15 +1719,17 @@ def train_cmd(
         encoder=encoder, pretrained=pretrained, patch_px=patch_px, batch_size=batch_size,
         steps=steps, learning_rate=learning_rate, val_groups=list(val_group),
         reviewed_only=not include_unreviewed, flip_vertical=flip_vertical, rotate90=rotate90,
-        device=device, seed=seed,
+        device=device, seed=seed, patience=patience,
     )
     try:
-        result = train(ds, output, cfg)
-    except (ValueError, FileExistsError, RuntimeError) as exc:
+        result = train(ds, output, cfg, resume=resume)
+    except (ValueError, FileExistsError, FileNotFoundError, RuntimeError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
     typer.echo(f"Trained on {result.n_train} item(s), validated on {result.n_val} "
-               f"({result.split}) in {result.seconds / 60:.1f} min")
+               f"({result.split}) in {result.seconds / 60:.1f} min"
+               + (f"; stopped early at step {result.stopped_early_at} (no improvement)"
+                  if result.stopped_early_at else ""))
     if result.val_metrics:
         v = result.val_metrics
         typer.echo(f"  validation IoU mean {v['iou_mean']:.4f} (min {v['iou_min']:.4f}), "

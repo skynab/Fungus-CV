@@ -180,6 +180,7 @@ def test_train_then_analyze_with_model(experiment, tmp_path):
     assert result.n_val >= 1 and result.val_metrics["iou_mean"] > 0.9
     card = json.loads((tmp_path / "model" / "model.json").read_text())
     assert card["dataset"]["fingerprint"] == ds.fingerprint(ds.selected())
+    assert card["input_profile"]["n"] == result.n_train  # what the model has seen
     assert not set(card["dataset"]["train_items"]) & set(card["dataset"]["val_items"])
 
     rows, summary = evaluate_model(tmp_path / "model", ds, device="cpu")
@@ -199,3 +200,70 @@ def test_train_then_analyze_with_model(experiment, tmp_path):
     measured = sorted(read_measurements(exp), key=lambda r: r["timestamp_utc"])
     for row, h in zip(measured, heights):
         assert float(row["extent_mm"]) == pytest.approx(h * syn.MM_PER_PX, abs=1.5)
+        assert row["model_input_distance"] != ""  # same scene: known, not flagged
+        assert "unfamiliar_input" not in row["flags"]
+
+
+def _tiny_dataset(experiment, tmp_path):
+    build_experiment(experiment, minutes=range(0, 7), bump_at=-1)
+    exp = Experiment(experiment.root)
+    analyze(exp)
+    ds = Dataset.create(tmp_path / "ds")
+    export_from_run(exp, ds, list_runs(exp)[0].run_id, count=7)
+    for item in ds.items:
+        item.reviewed = True
+    ds.save()
+    return ds
+
+
+def test_resumed_training_matches_an_uninterrupted_run(experiment, tmp_path):
+    pytest.importorskip("torchvision")
+    import torch
+
+    from fungus_cv.learn.train import CHECKPOINT_NAME, TrainConfig, TrainingCancelled, train
+
+    ds = _tiny_dataset(experiment, tmp_path)
+    cfg = TrainConfig(encoder="resnet18", pretrained=False, patch_px=64, batch_size=2,
+                      steps=24, eval_every=8, learning_rate=2e-3, device="cpu")
+    whole = train(ds, tmp_path / "whole", cfg)
+
+    steps = {"n": 0}
+
+    def stop_after_16():
+        steps["n"] += 1
+        return steps["n"] > 16
+
+    with pytest.raises(TrainingCancelled, match="resume it"):
+        train(ds, tmp_path / "parts", cfg, should_stop=stop_after_16)
+    assert (tmp_path / "parts" / CHECKPOINT_NAME).exists()
+    with pytest.raises(FileExistsError, match="interrupted run"):
+        train(ds, tmp_path / "parts", cfg)
+    changed = TrainConfig(**{**cfg.__dict__, "learning_rate": 1e-3})
+    with pytest.raises(ValueError, match="learning_rate"):
+        train(ds, tmp_path / "parts", changed, resume=True)
+
+    resumed = train(ds, tmp_path / "parts", cfg, resume=True)
+    assert not (tmp_path / "parts" / CHECKPOINT_NAME).exists()
+    a = torch.load(tmp_path / "whole" / "model.pt", weights_only=True)
+    b = torch.load(tmp_path / "parts" / "model.pt", weights_only=True)
+    for key in a:
+        assert torch.allclose(a[key].float(), b[key].float(), atol=1e-5), key
+    assert resumed.threshold == whole.threshold
+    card = json.loads((tmp_path / "parts" / "model.json").read_text())
+    assert card["training"]["resumed"] is True
+    assert [h["step"] for h in card["training"]["history"]] == [8, 16, 24]
+    with pytest.raises(FileNotFoundError, match="no interrupted run"):
+        train(ds, tmp_path / "nothing", cfg, resume=True)
+
+
+def test_early_stopping(experiment, tmp_path):
+    pytest.importorskip("torchvision")
+    from fungus_cv.learn.train import TrainConfig, train
+
+    ds = _tiny_dataset(experiment, tmp_path)
+    cfg = TrainConfig(encoder="resnet18", pretrained=False, patch_px=64, batch_size=2,
+                      steps=400, eval_every=5, learning_rate=0.0, device="cpu", patience=2)
+    result = train(ds, tmp_path / "m", cfg)  # a zero learning rate can never improve
+    assert result.stopped_early_at == 15  # first eval sets the best, then 2 without progress
+    card = json.loads((tmp_path / "m" / "model.json").read_text())
+    assert card["training"]["stopped_early_at_step"] == 15

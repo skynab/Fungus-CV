@@ -454,6 +454,8 @@ def test_train_page_trains_evaluates_uses_and_cancels(window, qtbot, experiment,
     qtbot.waitUntil(lambda: train_page.task is None, timeout=120000)
     assert "cancelled" in train_page.message.text()
     assert not (tmp_path / "models" / "dye-v2" / "model.pt").exists()
+    if (tmp_path / "models" / "dye-v2" / "checkpoint.pt").exists():  # got past an evaluation
+        assert train_page.resume.isVisible() and train_page.resume.isChecked()
 
 
 def test_study_page_edit_save_run_reopen(window, qtbot, tmp_path):

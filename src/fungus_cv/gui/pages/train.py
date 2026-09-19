@@ -100,12 +100,21 @@ class TrainPage(QWidget):
         self.pretrained.setChecked(True)
         self.device = QComboBox()
         self.device.addItems(["auto", "cuda", "mps", "cpu"])
+        self.patience = QSpinBox()
+        self.patience.setRange(0, 1000)
+        self.patience.setSpecialValueText("off")
+        self.patience.setToolTip("Stop when validation IoU hasn't improved for this many "
+                                 "evaluations")
+        self.resume = QCheckBox("Resume the interrupted run in this folder")
+        self.resume.setVisible(False)
+        self.output.textChanged.connect(self._output_changed)
 
         data_box = QGroupBox("Data")
         form = QFormLayout(data_box)
         form.addRow("Dataset", _folder_row(self.dataset, "Dataset folder"))
         form.addRow("Save model to", _folder_row(self.output, "New model folder"))
         form.addRow("", self.include_unreviewed)
+        form.addRow("", self.resume)
         settings_box = QGroupBox("Training")
         sform = QFormLayout(settings_box)
         sform.addRow("Encoder", self.encoder)
@@ -118,6 +127,7 @@ class TrainPage(QWidget):
         sform.addRow("", self.rotate90)
         sform.addRow("", self.pretrained)
         sform.addRow("Device", self.device)
+        sform.addRow("Stop early after", self.patience)
 
         self.start_btn = QPushButton("Start training")
         self.start_btn.clicked.connect(self.start)
@@ -187,6 +197,13 @@ class TrainPage(QWidget):
             if last:
                 self.dataset.setText(last)
 
+    def _output_changed(self, text: str) -> None:
+        from fungus_cv.learn.train import CHECKPOINT_NAME
+
+        interrupted = bool(text) and (Path(text) / CHECKPOINT_NAME).exists()
+        self.resume.setVisible(interrupted)
+        self.resume.setChecked(interrupted)
+
     def _dataset_changed(self, text: str) -> None:
         if text and (Path(text) / "dataset.json").exists() and self.task is None:
             self.output.setText(str(next_model_folder(Path(text))))
@@ -202,7 +219,7 @@ class TrainPage(QWidget):
             batch_size=self.batch.value(), steps=self.steps.value(),
             learning_rate=self.lr.value(), reviewed_only=not self.include_unreviewed.isChecked(),
             flip_vertical=self.flip_vertical.isChecked(), rotate90=self.rotate90.isChecked(),
-            device=self.device.currentText())
+            device=self.device.currentText(), patience=self.patience.value())
 
     def start(self) -> None:
         from fungus_cv.learn.dataset import Dataset
@@ -233,10 +250,13 @@ class TrainPage(QWidget):
         self.progress.setValue(0)
         self.message.setText(f"Training on {ds.name}…")
 
+        resume = self.resume.isVisible() and self.resume.isChecked()
+
         def work(progress, should_stop):
             from fungus_cv.learn.train import train
 
-            return train(ds, out, cfg, progress=progress, should_stop=should_stop)
+            return train(ds, out, cfg, progress=progress, should_stop=should_stop,
+                         resume=resume)
 
         self.task = run_task(work, self._trained, self._failed, self._progress)
 
@@ -286,6 +306,7 @@ class TrainPage(QWidget):
 
     def _failed(self, message: str) -> None:
         self._finish()
+        self._output_changed(self.output.text())  # a cancelled run can be resumed
         self._error(message)
 
     def _trained(self, result) -> None:

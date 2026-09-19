@@ -10,7 +10,7 @@ import pytest  # noqa: E402
 pytest.importorskip("PySide6")
 pytest.importorskip("pytestqt")
 
-from PySide6.QtCore import QPoint, QSettings, Qt  # noqa: E402
+from PySide6.QtCore import QPoint, QPointF, QSettings, Qt  # noqa: E402
 
 from fungus_cv.capture import permissions  # noqa: E402
 from fungus_cv.capture.permissions import NOT_APPLICABLE, CameraAccess  # noqa: E402
@@ -82,6 +82,48 @@ def test_image_view_click_maps_to_pixels(qtbot):
     assert abs(x - 200) < 3 and abs(y - 150) < 3 and button == Qt.LeftButton.value
 
 
+def test_image_view_pans_when_fitted_and_fit_button_restores(qtbot):
+    view = ImageView()
+    qtbot.addWidget(view)
+    view.resize(400, 300)
+    view.show()
+    view.set_image(np.zeros((300, 400, 3), np.uint8))
+    assert view.fit_button.isVisible()
+    centre = view.mapToScene(view.viewport().rect().center())
+    qtbot.mousePress(view.viewport(), Qt.MiddleButton, pos=QPoint(200, 150))
+    qtbot.mouseMove(view.viewport(), QPoint(260, 190))
+    qtbot.mouseRelease(view.viewport(), Qt.MiddleButton, pos=QPoint(260, 190))
+    panned = view.mapToScene(view.viewport().rect().center())
+    assert centre.x() - panned.x() > 30 and centre.y() - panned.y() > 20  # moved even at fit
+    view.fit_button.click()
+    fitted = view.mapToScene(view.viewport().rect().center())
+    assert abs(fitted.x() - centre.x()) < 3 and abs(fitted.y() - centre.y()) < 3
+
+
+def test_image_view_drags_handles_instead_of_clicking(qtbot):
+    view = ImageView()
+    qtbot.addWidget(view)
+    view.resize(400, 300)
+    view.show()
+    view.set_image(np.zeros((300, 400, 3), np.uint8))
+    view.handles = [(100.0, 100.0), (300.0, 200.0)]
+    moves, clicks = [], []
+    view.handle_moved.connect(lambda i, x, y, phase: moves.append((i, round(x), round(y),
+                                                                   phase)))
+    view.clicked.connect(lambda *a: clicks.append(a))
+    start = view.mapFromScene(QPointF(302, 198))  # within grab range of handle 1
+    qtbot.mousePress(view.viewport(), Qt.LeftButton, pos=start)
+    qtbot.mouseMove(view.viewport(), view.mapFromScene(QPointF(250, 150)))
+    qtbot.mouseRelease(view.viewport(), Qt.LeftButton,
+                       pos=view.mapFromScene(QPointF(250, 150)))
+    assert moves[0][0] == 1 and moves[0][3] == ImageView.STROKE_PRESS
+    i, x, y, phase = moves[-1]
+    assert i == 1 and phase == ImageView.STROKE_RELEASE and abs(x - 250) < 3
+    assert not clicks
+    qtbot.mouseClick(view.viewport(), Qt.LeftButton, pos=view.mapFromScene(QPointF(200, 50)))
+    assert len(clicks) == 1  # away from handles it is an ordinary click
+
+
 def test_open_experiment_and_save_settings(window, dye_experiment, qtbot):
     window.open_experiment(dye_experiment.root)
     assert window.state.experiment.root == dye_experiment.root
@@ -122,6 +164,11 @@ def test_full_workflow_setup_analyze_report(window, dye_experiment, qtbot):
         setup._clicked(x, y, Qt.LeftButton.value)
     setup._clicked(0, 0, Qt.RightButton.value)  # right-click undoes the last corner
     setup._clicked(*syn.ROI[-1], Qt.LeftButton.value)
+    # A misplaced point can be dragged into place: put the tip wrong, then move it back.
+    tip_handle = setup.view.handles.index(syn.TIP_POINT)
+    setup._handle_moved(tip_handle, 5.0, 5.0, ImageView.STROKE_MOVE)
+    assert setup.points["path"] == [(5.0, 5.0)]
+    setup._handle_moved(tip_handle, *syn.TIP_POINT, ImageView.STROKE_RELEASE)
     setup.save_annotations()
     ann = Annotations.load(dye_experiment.root / "annotations.json")
     assert ann.base == syn.BASE_POINT and ann.tip == syn.TIP_POINT and len(ann.roi) == 4

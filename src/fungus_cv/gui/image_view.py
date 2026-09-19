@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView
+from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QToolButton
 
 from fungus_cv.gui import theme
 from fungus_cv.gui.qt_util import bgr_to_pixmap
@@ -13,12 +13,14 @@ from fungus_cv.gui.qt_util import bgr_to_pixmap
 
 class ImageView(QGraphicsView):
     """Shows one image. Wheel/trackpad scroll zooms, middle-drag or Alt(Option)+drag pans,
-    double-click fits.
+    double-click or the Fit button fits the whole image.
 
     Emits ``clicked(x, y, button)`` and ``dragged(x0, y0, x1, y1)`` in full-resolution pixel
     coordinates (pixel centres are integers), so annotations are independent of zoom. With
     ``paint_enabled``, left/right drags emit ``stroke(x, y, button, phase)`` instead
-    (phase: 0 press, 1 move, 2 release), for brushes.
+    (phase: 0 press, 1 move, 2 release), for brushes. Left-dragging one of ``handles``
+    (points in image coordinates) emits ``handle_moved(index, x, y, phase)`` instead of a
+    click, so callers can let the user move points they placed.
     """
 
     STROKE_PRESS, STROKE_MOVE, STROKE_RELEASE = 0, 1, 2
@@ -27,6 +29,9 @@ class ImageView(QGraphicsView):
     dragged = Signal(float, float, float, float)
     hovered = Signal(float, float)
     stroke = Signal(float, float, int, int)
+    handle_moved = Signal(int, float, float, int)
+
+    HANDLE_GRAB_PX = 8  # how close (on screen) a press must be to grab a handle
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -51,6 +56,19 @@ class ImageView(QGraphicsView):
         self._painting: int | None = None  # mouse button of the stroke in progress
         self._has_image = False
         self._rubber = None
+        self._image_rect = QRectF()
+        self.handles: list[tuple[float, float]] = []
+        self._handle: int | None = None  # index of the handle being dragged
+        # Panning is by dragging, so scroll bars only take space; the scene rect is padded
+        # (see set_image) so the image can be panned even when it fits in the window.
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.fit_button = QToolButton(self)
+        self.fit_button.setText("Fit")
+        self.fit_button.setToolTip("Fit the whole image in the window (or double-click)")
+        self.fit_button.setCursor(Qt.ArrowCursor)
+        self.fit_button.clicked.connect(self.fit)
+        self.fit_button.hide()
 
     # --- content -----------------------------------------------------------------------
 
@@ -58,11 +76,17 @@ class ImageView(QGraphicsView):
         if image is None:
             self._pixmap_item.setPixmap(QPixmap())
             self._has_image = False
+            self.fit_button.hide()
             return
         first = not self._has_image
         self._pixmap_item.setPixmap(bgr_to_pixmap(image))
-        self.scene().setSceneRect(QRectF(-0.5, -0.5, image.shape[1], image.shape[0]))
+        h, w = image.shape[:2]
+        self._image_rect = QRectF(-0.5, -0.5, w, h)
+        self.scene().setSceneRect(self._image_rect)
+        pad = max(w, h)
+        self.setSceneRect(self._image_rect.adjusted(-pad, -pad, pad, pad))
         self._has_image = True
+        self.fit_button.show()
         if first or not keep_view:
             self.fit()
 
@@ -92,7 +116,23 @@ class ImageView(QGraphicsView):
 
     def fit(self) -> None:
         if self._has_image:
-            self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
+            self.fitInView(self._image_rect, Qt.KeepAspectRatio)
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        hint = self.fit_button.sizeHint()
+        self.fit_button.setGeometry(self.width() - hint.width() - 8, 8, hint.width(),
+                                    hint.height())
+
+    def _handle_at(self, pos) -> int | None:
+        """Index of the handle nearest ``pos`` (viewport pixels) within grab range."""
+        best, best_d = None, float(self.HANDLE_GRAB_PX) ** 2
+        for i, (x, y) in enumerate(self.handles):
+            p = self.mapFromScene(QPointF(x, y))
+            d = (p.x() - pos.x()) ** 2 + (p.y() - pos.y()) ** 2
+            if d <= best_d:
+                best, best_d = i, d
+        return best
 
     def clear_overlays(self) -> None:
         for item in self._overlays:
@@ -161,6 +201,13 @@ class ImageView(QGraphicsView):
                 self._painting = int(event.button().value)
                 self.stroke.emit(scene.x(), scene.y(), self._painting, self.STROKE_PRESS)
                 return
+            if event.button() == Qt.LeftButton:
+                self._handle = self._handle_at(event.position())
+                if self._handle is not None:
+                    self.setCursor(Qt.ClosedHandCursor)
+                    self.handle_moved.emit(self._handle, scene.x(), scene.y(),
+                                           self.STROKE_PRESS)
+                    return
             self._press = (scene, event.button())
         super().mousePressEvent(event)
 
@@ -168,14 +215,23 @@ class ImageView(QGraphicsView):
         if self._pan is not None:
             delta = event.position() - self._pan
             self._pan = event.position()
-            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
-            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            h, v = self.horizontalScrollBar(), self.verticalScrollBar()
+            h.setValue(round(h.value() - delta.x()))
+            v.setValue(round(v.value() - delta.y()))
             return
         scene = self.mapToScene(event.position().toPoint())
         self.hovered.emit(scene.x(), scene.y())
         if self._painting is not None:
             self.stroke.emit(scene.x(), scene.y(), self._painting, self.STROKE_MOVE)
             return
+        if self._handle is not None:
+            self.handle_moved.emit(self._handle, scene.x(), scene.y(), self.STROKE_MOVE)
+            return
+        if self._press is None and not self.paint_enabled:
+            if self._handle_at(event.position()) is not None:
+                self.setCursor(Qt.OpenHandCursor)
+            else:
+                self.unsetCursor()
         if self._press is not None and self.drag_enabled:
             start = self._press[0]
             rect = QRectF(start, scene).normalized()
@@ -195,6 +251,12 @@ class ImageView(QGraphicsView):
             scene = self.mapToScene(event.position().toPoint())
             self.stroke.emit(scene.x(), scene.y(), self._painting, self.STROKE_RELEASE)
             self._painting = None
+            return
+        if self._handle is not None:
+            scene = self.mapToScene(event.position().toPoint())
+            index, self._handle = self._handle, None
+            self.setCursor(Qt.OpenHandCursor)
+            self.handle_moved.emit(index, scene.x(), scene.y(), self.STROKE_RELEASE)
             return
         if self._press is not None:
             start, button = self._press

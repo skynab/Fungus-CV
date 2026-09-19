@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -53,6 +54,14 @@ class ReportPage(QWidget):
         self.custom_t0.toggled.connect(self.t0.setEnabled)
         self.time_unit = QComboBox()
         self.time_unit.addItems(["auto", "s", "min", "h", "d"])
+        self.hours = QLineEdit()
+        self.hours.setPlaceholderText("all day (e.g. 10-14 for outdoors)")
+        self.hours.setToolTip("Only frames taken in these local hours (the experiment's "
+                              "timezone), to leave out night and low sun.")
+        self.daily = QComboBox()
+        self.daily.addItems(["every frame", "median", "mean", "p90"])
+        self.daily.setToolTip("One value per day from its frames (p90 = 90th percentile, "
+                              "usual for greenness).")
         self.include_flagged = QCheckBox("Fit flagged frames too")
         self.exclude_jumps = QCheckBox("Leave jumps out of the fits")
         self.vector = QCheckBox("Also save PDF and SVG (for papers)")
@@ -65,6 +74,8 @@ class ReportPage(QWidget):
         form.addRow("Measurement", self.metric)
         form.addRow(self.custom_t0, self.t0)
         form.addRow("Time unit", self.time_unit)
+        form.addRow("Hours of the day", self.hours)
+        form.addRow("Per day", self.daily)
         form.addRow("", self.include_flagged)
         form.addRow("", self.exclude_jumps)
         form.addRow("", self.vector)
@@ -166,7 +177,13 @@ class ReportPage(QWidget):
         exp = self.state.experiment
         if exp is None:
             return
-        from fungus_cv.analyze.report import DEFAULT_EXCLUDE, make_report
+        from fungus_cv.analyze.report import DEFAULT_EXCLUDE, make_report, parse_hours
+
+        try:
+            hours = parse_hours(self.hours.text()) if self.hours.text().strip() else None
+        except ValueError as exc:
+            self._failed(str(exc))
+            return
 
         kwargs = dict(
             metric=self.metric.currentText() or None,
@@ -179,6 +196,8 @@ class ReportPage(QWidget):
             video=self.video.isChecked(),
             formats=("png", "pdf", "svg") if self.vector.isChecked() else ("png",),
             results_dir=self.state.results_dir(),
+            hours=hours,
+            daily=None if self.daily.currentIndex() == 0 else self.daily.currentText(),
         )
         self.make_btn.setEnabled(False)
         self.message.setText("Fitting models and drawing charts…")
@@ -191,7 +210,11 @@ class ReportPage(QWidget):
     def _done(self, result) -> None:
         self.result = result
         self.make_btn.setEnabled(True)
-        self.message.setText(f"{result.n_used} frames used, {result.n_excluded} excluded, "
+        unit = f"days (daily {result.daily})" if result.daily else "frames"
+        outside = (f" ({result.outside_hours} frames outside the hours)"
+                   if result.outside_hours else "")
+        self.message.setText(f"{result.n_used} {unit} used, {result.n_excluded} excluded"
+                             f"{outside}, "
                              f"{result.retreats} retreat(s), {result.jumps} jump(s) — see "
                              "frame_flags.csv. Time in " + result.time_unit + ".")
         from fungus_cv.analyze.fit import best_fit, format_derived, format_params

@@ -725,3 +725,22 @@ def test_report_page_spread_sensitivity_and_summary(window, qtbot, experiment, m
     report.make_summary()
     qtbot.waitUntil(lambda: bool(opened), timeout=120000)
     assert opened[0].endswith("summary.html") and "Wrote summary.html" in report.message.text()
+
+
+def test_report_page_hours_and_daily(window, qtbot, tmp_path):
+    from .test_daily import outdoor
+
+    exp = outdoor(tmp_path / "outdoor", days=4)
+    window.open_experiment(exp.root)
+    report = page(window, "Report")
+    report.refresh()
+    report.metric.setCurrentText("coverage_pct")
+    report.hours.setText("25-3")
+    report.make()
+    assert "hours must look like" in report.message.text()
+    report.hours.setText("10-14")
+    report.daily.setCurrentText("median")
+    report.make()
+    qtbot.waitUntil(lambda: report.result is not None, timeout=60000)
+    assert report.result.daily == "median" and report.result.n_used == 4
+    assert "4 days (daily median) used" in report.message.text()

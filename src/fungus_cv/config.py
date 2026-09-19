@@ -297,9 +297,34 @@ class ExperimentConfig(BaseModel):
 
     name: str
     description: str = ""
+    # Where the experiment is, as an IANA zone (e.g. Europe/Berlin), for "hours of the day"
+    # and "days" in reports. None = this computer's zone.
+    timezone: str | None = None
     cameras: list[CameraConfig] = Field(default_factory=lambda: [CameraConfig()])
     capture: CaptureConfig = Field(default_factory=CaptureConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
+
+    @field_validator("timezone")
+    @classmethod
+    def _zone(cls, v: str | None) -> str | None:
+        if v:
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+            try:
+                ZoneInfo(v)
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise ValueError(f"unknown time zone {v!r}; use a name like Europe/Berlin") \
+                    from exc
+        return v or None
+
+    def tzinfo(self):
+        """The site's time zone, or None for this computer's (``dt.astimezone(None)`` then
+        follows the computer's daylight-saving rules for each date)."""
+        if self.timezone:
+            from zoneinfo import ZoneInfo
+
+            return ZoneInfo(self.timezone)
+        return None
 
     @model_validator(mode="after")
     def _unique_cameras(self) -> ExperimentConfig:
@@ -328,6 +353,7 @@ def default_config_yaml(name: str) -> str:
 # Fungus-CV experiment configuration
 name: {name}
 description: ""
+timezone: null            # where the experiment is, e.g. Europe/Berlin (null = this computer's)
 
 cameras:
   - name: cam0            # used in file names; letters, digits, _ and -

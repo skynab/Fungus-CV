@@ -33,6 +33,7 @@ from scipy import stats
 from fungus_cv.analyze.fit import DERIVED, MODELS, FitResult, fit_all, json_safe, parse_level
 from fungus_cv.analyze.pipeline import RESULTS_DIR
 from fungus_cv.analyze.report import (
+    DAILY_STATS,
     DEFAULT_EXCLUDE,
     INK,
     INK_2,
@@ -41,6 +42,7 @@ from fungus_cv.analyze.report import (
     Series,
     _style,
     load_series,
+    parse_hours,
     pick_time_unit,
     save_figure,
 )
@@ -79,6 +81,8 @@ class Study(BaseModel):
     params: list[str] | None = None  # default: every parameter of the model
     exclude_flags: list[str] = Field(default_factory=lambda: list(DEFAULT_EXCLUDE))
     exclude_jumps: bool = False
+    hours: str | None = None  # e.g. "10-14": only frames taken then (local time), for outdoors
+    daily: str | None = None  # median | mean | p90: one value per day
     bootstrap: int = Field(1000, ge=0)
     errors: str = "auto"  # auto | iid | ar1: are frame errors correlated in time?
     seed: int = 0
@@ -95,6 +99,10 @@ class Study(BaseModel):
         if wrong:
             raise ValueError(f"{self.model} has no parameter(s) {wrong}; use its parameters "
                              f"{list(own)}, or max_rate, t_max_rate, lag, time_to_<value>")
+        if self.hours is not None:
+            parse_hours(self.hours)
+        if self.daily is not None and self.daily not in DAILY_STATS:
+            raise ValueError(f"daily must be one of {list(DAILY_STATS)}")
         if self.errors not in ("auto", "iid", "ar1"):
             raise ValueError("errors must be auto, iid or ar1")
         if self.time_unit != "auto" and self.time_unit not in TIME_UNITS:
@@ -290,17 +298,20 @@ def run_study(study_path: Path, out_dir: Path | None = None) -> StudyResult:
         try:
             experiment = Experiment(rep.experiment)
             rep.series = load_series(experiment, metric, spec.plot, t0, "s",
-                                     tuple(study.exclude_flags), study.exclude_jumps)
+                                     tuple(study.exclude_flags), study.exclude_jumps,
+                                     hours=parse_hours(study.hours) if study.hours else None,
+                                     daily=study.daily)
         except (FileNotFoundError, ValueError) as exc:
             rep.error = str(exc)
             warnings.append(f"{rep.condition}/{rep.replicate}: {exc}")
             continue
         metric = metric or rep.series.metric  # the first replicate decides for all
         rep.plot = rep.series.plot
-        hashes = {r["settings_hash"] for r in rep.series.rows}
+        frame_rows = (rep.series.frames or rep.series).rows
+        hashes = {r["settings_hash"] for r in frame_rows}
         rep.settings_hash = ",".join(sorted(hashes))
         if len(hashes) == 1:
-            rep.settings = _run_settings(rep.experiment, rep.series.rows[0]["settings_hash"])
+            rep.settings = _run_settings(rep.experiment, frame_rows[0]["settings_hash"])
 
     loaded = [r for r in replicates if r.series is not None]
     if not loaded:
@@ -543,7 +554,7 @@ def methods_text(result: StudyResult) -> str:
         + f". Frames flagged {', '.join(study.exclude_flags) or '(none)'} were excluded"
         + ("; so were frames departing from the local trend (jumps)" if study.exclude_jumps
            else "") + "."
-        + _manual_text(loaded),
+        + _manual_text(loaded) + _daily_text(study),
     ]
     fitted = [r.fit for r in loaded if r.fit]
     n_ar1 = sum(f.error_model == "ar1" for f in fitted)
@@ -591,8 +602,22 @@ def methods_text(result: StudyResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _daily_text(study: Study) -> str:
+    parts = []
+    if study.hours:
+        parts.append(f" Only frames taken between {study.hours.replace('-', ' and ')} h local "
+                     "time were used.")
+    if study.daily:
+        what = {"median": "median", "mean": "mean", "p90": "90th percentile"}[study.daily]
+        parts.append(
+            f" Each day's usable frames were reduced to their {what}; its uncertainty combined "
+            "the frames' mean measurement uncertainty with the bootstrap standard error of the "
+            "daily statistic over that day's frames.")
+    return "".join(parts)
+
+
 def _manual_text(replicates: list[Replicate]) -> str:
-    reasons = [m for r in replicates for m in r.series.manual if m]
+    reasons = [m for r in replicates for m in (r.series.frames or r.series).manual if m]
     if not reasons:
         return ""
     counts: dict[str, int] = {}

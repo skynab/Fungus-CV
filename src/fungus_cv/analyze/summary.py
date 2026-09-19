@@ -122,7 +122,11 @@ def _fits_table(report: ReportResult) -> str:
 
 def _left_out(report_dir: Path) -> str:
     info = json.loads((report_dir / "fits.json").read_text(encoding="utf-8"))
-    parts = [f"{info['n_used']} frames fitted, {info['n_excluded']} left out"]
+    unit = f"days (daily {info['daily']})" if info.get("daily") else "frames"
+    parts = [f"{info['n_used']} {unit} fitted, {info['n_excluded']} left out"]
+    if info.get("hours"):
+        start, end = info["hours"]
+        parts.append(f"only frames taken {start:g}–{end:g} h ({info.get('timezone')} time)")
     if info.get("excluded_flags"):
         parts.append("frames flagged " + ", ".join(info["excluded_flags"]) + " are not fitted")
     if info.get("jumps"):
@@ -150,7 +154,9 @@ def make_summary(experiment: Experiment, metric: str | None = None,
                  results_dir: Path | None = None, out: Path | None = None,
                  models: tuple[str, ...] = DEFAULT_MODELS, bootstrap: int = 500,
                  exclude_flags: tuple[str, ...] = DEFAULT_EXCLUDE, exclude_jumps: bool = False,
-                 time_to: tuple[float, ...] = (), seed: int = 0) -> SummaryResult:
+                 time_to: tuple[float, ...] = (), seed: int = 0,
+                 hours: tuple[float, float] | None = None,
+                 daily: str | None = None) -> SummaryResult:
     results_dir = Path(results_dir) if results_dir else experiment.root / "results"
     if not (results_dir / MEASUREMENTS_NAME).exists():
         raise FileNotFoundError(f"{results_dir / MEASUREMENTS_NAME} not found; "
@@ -189,7 +195,8 @@ def make_summary(experiment: Experiment, metric: str | None = None,
             report = make_report(experiment, metric=metric, plot=plot, models=models,
                                  bootstrap=bootstrap, exclude_flags=exclude_flags,
                                  exclude_jumps=exclude_jumps, results_dir=results_dir,
-                                 time_to=time_to, seed=seed, formats=("png",))
+                                 time_to=time_to, seed=seed, formats=("png",),
+                                 hours=hours, daily=daily)
         except (ValueError, RuntimeError) as exc:
             result.problems.append(f"{plot}: {exc}")
             body.append(f"<h2>{_e(plot)}</h2><p class=warn>Not fitted: {_e(exc)}</p>")

@@ -43,6 +43,8 @@ class ReportResult:
     retreats: int
     jumps: int = 0
     fits: list[FitResult] = field(default_factory=list)
+    outside_hours: int = 0  # frames left out for being outside the chosen hours
+    daily: str | None = None  # the points are days, reduced with this statistic
     files: list[str] = field(default_factory=list)
 
 
@@ -200,6 +202,9 @@ class Series:
     jump: np.ndarray
     retreat: np.ndarray
     manual: list[str] = field(default_factory=list)  # reason a person excluded a frame, or ""
+    outside_hours: np.ndarray | None = None  # taken outside the chosen hours of the day
+    daily: str | None = None  # the statistic each day was reduced to, if this is daily
+    frames: Series | None = None  # for a daily series: the frames it was made from
 
     @property
     def use(self) -> np.ndarray:
@@ -216,6 +221,33 @@ class Series:
         return u if len(u) and np.all(np.isfinite(u)) and np.all(u > 0) else None
 
 
+DAILY_STATS = ("median", "mean", "p90")
+
+
+def parse_hours(text: str) -> tuple[float, float]:
+    """``10-14`` or ``9:30-15`` (local hours, start inclusive); ``20-6`` wraps past midnight."""
+    def hour(part: str) -> float:
+        h, _, m = part.strip().partition(":")
+        value = int(h) + (int(m) / 60 if m else 0.0)
+        if not 0 <= value <= 24:
+            raise ValueError
+        return value
+
+    try:
+        start, end = (hour(x) for x in text.split("-"))
+    except ValueError:
+        raise ValueError(f"hours must look like 10-14 or 9:30-15, not {text!r}") from None
+    if start == end:
+        raise ValueError(f"empty hours window {text!r}")
+    return start, end
+
+
+def in_hours(local: datetime, hours: tuple[float, float]) -> bool:
+    h = local.hour + local.minute / 60 + local.second / 3600
+    start, end = hours
+    return start <= h < end if start < end else (h >= start or h < end)
+
+
 def load_series(
     experiment: Experiment,
     metric: str | None = None,
@@ -225,7 +257,17 @@ def load_series(
     exclude_flags: tuple[str, ...] = DEFAULT_EXCLUDE,
     exclude_jumps: bool = False,
     results_dir: Path | None = None,
+    hours: tuple[float, float] | None = None,
+    daily: str | None = None,
 ) -> Series:
+    """One metric over time, with the frames that go into fits marked.
+
+    ``hours`` keeps only frames taken in that window of the local day (the experiment's
+    ``timezone``): for outdoor runs, leave out night and low sun. ``daily`` then reduces each
+    local day's usable frames to one value (see `daily_series`).
+    """
+    if daily is not None and daily not in DAILY_STATS:
+        raise ValueError(f"daily must be one of {list(DAILY_STATS)}, not {daily!r}")
     plots = list_plots(experiment, results_dir)
     if plot is None:
         if len(plots) > 1:
@@ -264,12 +306,96 @@ def load_series(
     manual = [exclusions.reason_for(marked, r["frame_file"], plot) for r in rows]
     excluded = np.array([bool(f & set(exclude_flags)) for f in flags]) | np.isnan(y) | (t < 0)
     excluded |= np.array([bool(m) for m in manual])
+    outside = None
+    if hours is not None:
+        tz = experiment.config.tzinfo()
+        outside = np.array([not in_hours(datetime.fromtimestamp(ts, timezone.utc).astimezone(tz),
+                                         hours) for ts in times])
+        excluded |= outside
+    if daily is not None:
+        frames = _finish_series(Series(metric, plot, rows, time_unit, t0_ts, t, y, unc, excluded,
+                                       np.zeros(len(rows), bool), np.zeros(len(rows), bool),
+                                       manual, outside), exclude_jumps)
+        return _finish_series(daily_series(frames, daily, experiment.config.tzinfo()),
+                              exclude_jumps)
+    return _finish_series(Series(metric, plot, rows, time_unit, t0_ts, t, y, unc, excluded,
+                                 np.zeros(len(rows), bool), np.zeros(len(rows), bool), manual,
+                                 outside), exclude_jumps)
+
+
+def _finish_series(series: Series, exclude_jumps: bool) -> Series:
+    """Mark jumps and retreats among the usable points (and drop jumps if asked)."""
+    t, y, unc, excluded = series.t, series.y, series.unc, series.excluded
     jump = detect_jumps(t, np.where(excluded, np.nan, y), unc) & ~excluded
     if exclude_jumps:
         excluded = excluded | jump
     retreat = count_retreats(np.where(excluded, np.nan, y), unc) & ~excluded
-    return Series(metric, plot, rows, time_unit, t0_ts, t, y, unc, excluded, jump, retreat,
-                  manual)
+    series.excluded, series.jump, series.retreat = excluded, jump, retreat
+    return series
+
+
+def _statistic(values: np.ndarray, stat: str) -> float:
+    if stat == "mean":
+        return float(np.mean(values))
+    if stat == "p90":
+        return float(np.percentile(values, 90))
+    return float(np.median(values))
+
+
+def daily_series(frames: Series, stat: str = "median", tz=None, n_boot: int = 400,
+                 seed: int = 0) -> Series:
+    """One point per local day from the usable frames: the day's ``stat`` (median, mean or
+    90th percentile, as phenology cameras use for greenness).
+
+    Its uncertainty adds, in quadrature, the frames' mean reported uncertainty (errors that
+    every frame of a day shares) and the standard error of the statistic from the scatter
+    within the day (bootstrap over the day's frames; with two frames, sd/sqrt(2)). A day
+    with a single frame has no scatter to go on, so only the reported uncertainty counts.
+    """
+    use = frames.use
+    stamps = frames.t0_ts + frames.t * TIME_UNITS[frames.time_unit]
+    by_day: dict = {}
+    for i in np.flatnonzero(use):
+        day = datetime.fromtimestamp(stamps[i], timezone.utc).astimezone(tz).date()
+        by_day.setdefault(day, []).append(i)
+    rng = np.random.default_rng(seed)
+    rows, t, y, unc = [], [], [], []
+    for day in sorted(by_day):
+        idx = np.array(by_day[day])
+        values = frames.y[idx]
+        value = _statistic(values, stat)
+        if len(idx) >= 3:
+            picks = rng.integers(0, len(idx), (n_boot, len(idx)))
+            se = float(np.std([_statistic(values[p], stat) for p in picks], ddof=1))
+        elif len(idx) == 2:
+            se = float(np.std(values, ddof=1) / math.sqrt(2))
+        else:
+            se = math.nan
+        u_frames = frames.unc[idx]
+        u_shared = float(np.mean(u_frames)) if np.isfinite(u_frames).all() else math.nan
+        parts = [v for v in (u_shared, se) if math.isfinite(v)]
+        u = math.sqrt(sum(v * v for v in parts)) if parts else math.nan
+        middle = float(np.median(stamps[idx]))
+        last = frames.rows[idx[-1]]
+        rows.append({
+            "timestamp_utc": iso_utc(datetime.fromtimestamp(middle, timezone.utc)),
+            "frame_file": f"{day.isoformat()} ({len(idx)} frames)",
+            "plot": frames.plot, "flags": "", frames.metric: value,
+            f"{frames.metric}_unc": u, "overlay_file": last.get("overlay_file", ""),
+            "n_frames": len(idx),
+            **{k: last.get(k, "") for k in ("mean_brightness", "align_shift_px",
+                                             "align_rms_px", "coverage_pct",
+                                             "light_gain_g")},
+        })
+        t.append((middle - frames.t0_ts) / TIME_UNITS[frames.time_unit])
+        y.append(value)
+        unc.append(u)
+    n = len(rows)
+    if not n:
+        raise ValueError("no usable frames left to make daily values from")
+    return Series(frames.metric, frames.plot, rows, frames.time_unit, frames.t0_ts,
+                  np.array(t), np.array(y), np.array(unc), np.zeros(n, bool),
+                  np.zeros(n, bool), np.zeros(n, bool), [""] * n, None, stat, frames)
 
 
 def make_report(
@@ -290,6 +416,8 @@ def make_report(
     seed: int = 0,
     results_dir: Path | None = None,
     time_to: tuple[float, ...] = (),
+    hours: tuple[float, float] | None = None,
+    daily: str | None = None,
 ) -> ReportResult:
     import matplotlib
 
@@ -298,7 +426,7 @@ def make_report(
 
     plots = list_plots(experiment, results_dir)
     series = load_series(experiment, metric, plot, t0, time_unit, exclude_flags, exclude_jumps,
-                         results_dir)
+                         results_dir, hours=hours, daily=daily)
     metric, plot, rows, time_unit = series.metric, series.plot, series.rows, series.time_unit
     t, y, unc = series.t, series.y, series.unc
     excluded, jump, retreat, use = series.excluded, series.jump, series.retreat, series.use
@@ -316,6 +444,9 @@ def make_report(
         t0_utc=iso_utc(datetime.fromtimestamp(t0_ts, timezone.utc)),
         n_used=int(use.sum()), n_excluded=int(excluded.sum()),
         retreats=int(retreat.sum()), jumps=int(jump.sum()), fits=fits,
+        outside_hours=int((series.frames or series).outside_hours.sum())
+        if (series.frames or series).outside_hours is not None else 0,
+        daily=series.daily,
     )
 
     # Every frame's flags in one place, so exclusions can be audited.
@@ -324,12 +455,27 @@ def make_report(
         writer = csv.writer(f)
         writer.writerow(["timestamp_utc", "frame_file", f"t_{time_unit}", metric,
                          "pipeline_flags", "jump", "retreat", "excluded_by_hand",
-                         "used_in_fits"])
-        for i, r in enumerate(rows):
-            writer.writerow([r["timestamp_utc"], r["frame_file"], round(float(t[i]), 6),
-                             r[metric], r["flags"], int(jump[i]), int(retreat[i]),
-                             series.manual[i], int(use[i])])
+                         "outside_hours", "used_in_fits"])
+        framewise = series.frames or series  # daily: list the frames behind the days
+        for i, r in enumerate(framewise.rows):
+            outside = framewise.outside_hours is not None and framewise.outside_hours[i]
+            writer.writerow([r["timestamp_utc"], r["frame_file"],
+                             round(float(framewise.t[i]), 6), r[metric], r["flags"],
+                             int(framewise.jump[i]), int(framewise.retreat[i]),
+                             framewise.manual[i], int(outside), int(framewise.use[i])])
     result.files.append(flags_csv)
+    if series.daily:
+        daily_csv = out_dir / "daily.csv"
+        with open(daily_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["day", "timestamp_utc", f"t_{time_unit}", f"{metric}_{daily}",
+                             f"{metric}_unc", "frames", "jump", "retreat"])
+            for i, r in enumerate(rows):
+                writer.writerow([r["frame_file"].split(" ")[0], r["timestamp_utc"],
+                                 round(float(t[i]), 6), round(float(y[i]), 6),
+                                 "" if not math.isfinite(unc[i]) else round(float(unc[i]), 6),
+                                 r["n_frames"], int(jump[i]), int(retreat[i])])
+        result.files.append(daily_csv)
 
     # --- main plot: metric over time with fits ---------------------------------------
     label = {"extent_mm": "Extent (mm)", "extent_px": "Extent (px)",
@@ -348,6 +494,8 @@ def make_report(
              "exg_mean": "Excess green (mean)"}.get(metric, metric)
     if metric.startswith("class_") and metric.endswith("_pct"):
         label = f"Share {metric[6:-4]} (%)"
+    if series.daily:
+        label = f"{label} — daily {daily}"
     fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
     _style(ax)
     if np.isfinite(unc[use]).any():
@@ -355,6 +503,10 @@ def make_report(
                     elinewidth=1, capsize=0, label="measured", zorder=3)
     else:
         ax.plot(t[use], y[use], "o", ms=4, color=INK_2, label="measured", zorder=3)
+    if series.daily:  # the frames behind each day, faintly
+        frames = series.frames
+        ax.plot(frames.t[frames.use], frames.y[frames.use], ".", ms=3, color=GRID,
+                label="frames", zorder=1)
     if excluded.any():
         ax.plot(t[excluded], y[excluded], "x", ms=6, color=INK_2, alpha=0.6,
                 label="excluded (flagged)", zorder=3)
@@ -397,8 +549,9 @@ def make_report(
     fig, axes = plt.subplots(len(qc), 1, figsize=(8, 8), dpi=150, sharex=True)
     for ax, (col, title) in zip(axes, qc):
         _style(ax)
-        values = np.array([_float(r[col]) for r in rows])
-        ax.plot(t, values, color=SERIES[0], lw=2)
+        framewise = series.frames or series
+        values = np.array([_float(r.get(col, "")) for r in framewise.rows])
+        ax.plot(framewise.t, values, color=SERIES[0], lw=2)
         ax.set_ylabel(title, color=INK, fontsize=9)
     axes[-1].set_xlabel(f"Time since start ({time_unit})", color=INK)
     axes[0].set_title("Quality checks", color=INK, loc="left", fontsize=12)
@@ -445,7 +598,11 @@ def make_report(
         "excluded_flags": list(exclude_flags), "retreats": result.retreats,
         "jumps": result.jumps, "jumps_excluded": exclude_jumps,
         "excluded_by_hand": [{"frame_file": r["frame_file"], "reason": m}
-                             for r, m in zip(rows, series.manual) if m],
+                             for r, m in zip((series.frames or series).rows,
+                                             (series.frames or series).manual) if m],
+        "hours": list(hours) if hours else None,
+        "timezone": experiment.config.timezone or "this computer's",
+        "daily": daily,
         "weighted_by_uncertainty": sigma is not None,
         "model_selection": "AICc; akaike_weight = relative likelihood among the fitted models",
         "fits": [f.to_dict() for f in fits],

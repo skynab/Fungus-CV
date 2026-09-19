@@ -662,6 +662,11 @@ def report(
                                             "(default), pdf, svg. Repeatable; pdf and svg are "
                                             "vector, for papers."),
     dpi: int = typer.Option(150, help="Resolution of the png figures."),
+    hours: str | None = typer.Option(None, help="Only frames taken in these local hours, "
+                                     "e.g. 10-14 (outdoors: leave out night and low sun). "
+                                     "Uses the experiment's timezone."),
+    daily: str | None = typer.Option(None, help="One value per day from its frames: median, "
+                                     "mean or p90 (90th percentile, as for greenness)."),
 ) -> None:
     """Fit growth models and write plots to results/report/ (one folder per field plot)."""
     from fungus_cv.analyze.fit import (
@@ -677,6 +682,7 @@ def report(
         FIGURE_FORMATS,
         list_plots,
         make_report,
+        parse_hours,
     )
 
     exp = _load_experiment(experiment)
@@ -707,6 +713,7 @@ def report(
             exclude_jumps=exclude_jumps, plot=name, models=tuple(model) or DEFAULT_MODELS,
             formats=tuple(figure_format) or DEFAULT_FORMATS, dpi=dpi, time_to=tuple(time_to),
             bootstrap=bootstrap, errors=errors,
+            hours=parse_hours(hours) if hours else None, daily=daily,
         ) for name in plots]
     except (FileNotFoundError, ValueError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
@@ -714,7 +721,12 @@ def report(
 
     for result in results:
         where = "" if result.plot == "main" else f"[{result.plot}] "
-        typer.echo(f"{where}{result.metric}: {result.n_used} frames used, "
+        if result.outside_hours:
+            typer.echo(f"{where}{result.outside_hours} frame(s) outside {hours} h left out")
+        if result.daily:
+            where += f"daily {result.daily}: "
+        typer.echo(f"{where}{result.metric}: {result.n_used} "
+                   f"{'days' if result.daily else 'frames'} used, "
                    f"{result.n_excluded} excluded, {result.retreats} retreat(s) and "
                    f"{result.jumps} jump(s) to check (see frame_flags.csv); "
                    f"time in {result.time_unit}")
@@ -854,12 +866,17 @@ def summary(
     exclude_jumps: bool = typer.Option(False, help="Leave jumps out of the fits."),
     time_to: list[float] = typer.Option([], help="Also report when the curve reaches this "
                                         "value (repeatable)."),
+    hours: str | None = typer.Option(None, help="Only frames taken in these local hours, "
+                                     "e.g. 10-14 (outdoors: leave out night and low sun). "
+                                     "Uses the experiment's timezone."),
+    daily: str | None = typer.Option(None, help="One value per day from its frames: median, "
+                                     "mean or p90 (90th percentile, as for greenness)."),
 ) -> None:
     """One self-contained HTML page with every plot's figures, fits, intervals, what was left
     out and why, the settings and the software version: for sharing."""
     from fungus_cv.analyze.fit import DEFAULT_MODELS, MODELS
     from fungus_cv.analyze.pipeline import results_dir_for
-    from fungus_cv.analyze.report import DEFAULT_EXCLUDE
+    from fungus_cv.analyze.report import DEFAULT_EXCLUDE, parse_hours
     from fungus_cv.analyze.summary import make_summary
 
     exp = _load_experiment(experiment)
@@ -874,7 +891,8 @@ def summary(
                               out=out, models=tuple(model) or DEFAULT_MODELS,
                               bootstrap=bootstrap, time_to=tuple(time_to),
                               exclude_flags=() if include_flagged else DEFAULT_EXCLUDE,
-                              exclude_jumps=exclude_jumps)
+                              exclude_jumps=exclude_jumps,
+                              hours=parse_hours(hours) if hours else None, daily=daily)
     except (FileNotFoundError, ValueError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc

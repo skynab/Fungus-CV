@@ -486,6 +486,19 @@ fungus label datasets/moss-bark --unreviewed --by-priority --sam
 fungus train datasets/moss-bark models/moss-bark-v2
 ```
 
+### Correcting labels in CVAT, Label Studio or another tool
+
+```bash
+fungus dataset export-coco datasets/moss-bark coco-out/ --rle    # images/ + annotations.json
+# ... correct the masks in CVAT, export as COCO ...
+fungus dataset import-coco datasets/moss-bark cvat-export/annotations.json --reviewed
+```
+
+- **Two forms:** `--rle` writes exact run-length masks (what CVAT itself writes for masks). Without it, masks are written as polygons, which every tool reads but which lose holes.
+- **Import** reads both forms, including compressed RLE, and merges them: an item with the same name gets the new mask, and a new image is added as a new item.
+- **Several categories:** `--category` chooses which ones count as the target, e.g. only "moss" when the file also has "stem".
+- **Checked against the reference:** the run-length encoding is byte-for-byte identical to `pycocotools` (checked in the tests), but that package isn't needed to use it.
+
 ### Labeling the most useful frames first (active learning)
 
 Evenly spaced frames mostly repeat what the model already gets right. `fungus dataset suggest` scores an experiment's frames and adds the most informative ones as unreviewed items:

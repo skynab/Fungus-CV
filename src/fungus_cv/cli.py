@@ -1550,6 +1550,58 @@ def dataset_add_pairs(
     typer.echo(f"Added {len(added)} item(s) ({len(ds.items)} total)")
 
 
+@dataset_app.command("export-coco")
+def dataset_export_coco(
+    dataset: Path = typer.Argument(..., help="Dataset folder."),
+    out: Path = typer.Argument(..., help="Folder to write images/ and annotations.json to."),
+    rle: bool = typer.Option(False, help="Exact run-length masks (as CVAT writes) instead of "
+                             "polygons (which lose holes)."),
+    reviewed_only: bool = typer.Option(False, help="Only items marked reviewed."),
+) -> None:
+    """Export labels as COCO JSON, to correct them in CVAT, Label Studio or other tools."""
+    from fungus_cv.learn.coco import export_coco
+    from fungus_cv.learn.dataset import Dataset
+
+    try:
+        ds = Dataset.open(dataset)
+    except FileNotFoundError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    path = export_coco(ds, out, rle=rle, reviewed_only=reviewed_only)
+    n = len(ds.selected(reviewed_only))
+    typer.echo(f"Wrote {path} with {n} image(s) as {'RLE' if rle else 'polygons'}. "
+               f"Bring corrections back with `fungus dataset import-coco {dataset} "
+               "<exported annotations.json>`.")
+
+
+@dataset_app.command("import-coco")
+def dataset_import_coco(
+    dataset: Path = typer.Argument(..., help="Dataset folder (created if missing)."),
+    coco_json: Path = typer.Argument(..., exists=True, dir_okay=False,
+                                     help="COCO annotations file."),
+    images: Path | None = typer.Option(None, help="Folder of the images (default: images/ "
+                                       "next to the file)."),
+    category: list[str] = typer.Option([], help="Categories that count as target "
+                                       "(repeatable; default: all)."),
+    reviewed: bool = typer.Option(False, help="Mark the imported masks reviewed."),
+    group: str = typer.Option("imported", help="Group for new items."),
+) -> None:
+    """Import masks from COCO JSON: items with the same name are updated, new images added."""
+    from fungus_cv.learn.coco import import_coco
+    from fungus_cv.learn.dataset import Dataset
+
+    ds = Dataset.open_or_create(dataset)
+    try:
+        result = import_coco(ds, coco_json, images, list(category) or None, reviewed, group)
+    except (ValueError, KeyError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Updated {len(result.updated)} and added {len(result.added)} item(s)"
+               + (" (marked reviewed)" if reviewed else "") + ".")
+    for message in result.skipped:
+        typer.secho(f"skipped {message}", fg=typer.colors.YELLOW)
+
+
 @dataset_app.command("info")
 def dataset_info(dataset: Path = typer.Argument(..., help="Dataset folder.")) -> None:
     """Show items per group and how many are reviewed."""

@@ -992,6 +992,48 @@ def study(
     typer.echo(f"wrote {result.out_dir} (methods.md has a draft methods paragraph)")
 
 
+@app.command("spread")
+def spread_cmd(
+    experiment: Path = typer.Argument(..., help="Experiment folder (analyzed, masks saved)."),
+    plot: list[str] = typer.Option([], help="Plot(s) (repeatable). Default: all."),
+    camera: str | None = typer.Option(None, help="Which camera's results."),
+    directions: int = typer.Option(8, help="How many direction sectors."),
+    persistence: int = typer.Option(2, help="Frames a point must stay covered to count as "
+                                    "reached."),
+    time_unit: str = typer.Option("auto", help="auto | s | min | h | d"),
+    figure_format: list[str] = typer.Option([], "--format", help="png (default), pdf, svg."),
+) -> None:
+    """Map when each point was reached, and how fast the edge advanced in each direction."""
+    from fungus_cv.analyze.pipeline import results_dir_for
+    from fungus_cv.analyze.report import DEFAULT_FORMATS, list_plots
+    from fungus_cv.analyze.spread import spread
+
+    exp = _load_experiment(experiment)
+    _setup_logging()
+    try:
+        names = list(plot) or list_plots(exp, results_dir_for(exp, camera))
+        for name in names:
+            r = spread(exp, plot=name, camera=camera, persistence=persistence,
+                       sectors=directions, time_unit=time_unit,
+                       formats=tuple(figure_format) or DEFAULT_FORMATS)
+            unit = f"{r.unit}/{r.time_unit}"
+            typer.echo(f"{r.plot}: front speed {r.mean_speed:.4g} {unit} on average, "
+                       f"equivalent radius grows {r.area_speed:.4g} {unit}")
+            fastest = r.fastest
+            if fastest is not None:
+                typer.echo(f"  fastest toward {fastest.angle_deg:.0f}° ({fastest.speed:.4g} ± "
+                           f"{fastest.se:.2g} {unit}); fastest/slowest = {r.anisotropy:.2f} "
+                           "(1 = even; 0° = right, 90° = up)")
+            for s in r.sectors:
+                typer.echo(f"  {s.angle_deg:5.0f}°  {s.speed:8.4g} ± {s.se:.2g}  "
+                           f"(R² {s.r2:.2f}, {s.n} frames)")
+            for f in r.files:
+                typer.echo(f"wrote {f}")
+    except (ValueError, FileNotFoundError, KeyError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
+
+
 @app.command()
 def combine(
     experiment: Path = typer.Argument(..., help="Experiment folder with several cameras."),

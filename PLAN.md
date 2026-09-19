@@ -10,6 +10,7 @@ Time-lapse capture plus computer-vision measurement of how far a "spreading" reg
 
 - **Works end to end** on synthetic data: capture → measure → uncertainty → fits → report, from the command line and from the desktop app.
 - **Ready and waiting for real data:** `fungus validate-suite` re-runs every accuracy check against hand-labeled frames (Bland–Altman agreement, mask IoU, model metrics) and compares them with a saved baseline. It needs your dye and moss frames.
+- **Try it without a camera:** `fungus demo` makes a realistic synthetic experiment with its truth, hand measurements and a validation suite.
 - **The three things that still need you:** a real dye run (does the √t law come out?), ~20 hand-measured moss frames, and an 8-hour unattended capture on each OS. `fungus health --watch` is there to watch that last one.
 
 See the README for how to use any of it.
@@ -195,6 +196,7 @@ Everything below was added after the first plan, to make the results publishable
 | M11 ✅ | **Incremental SAM 2:** tracking memory saved with the run and resumed | A new frame costs one frame of tracking, and the masks are identical to re-tracking from the start (checked with the real model: frame 61 took 1.1 s instead of 56 s) |
 | M12 ✅ | **Desktop app covers the whole workflow:** SAM prompts, labeling, training, studies, validation, live measuring during capture, excluding frames by hand | Every command-line feature has a page; GUI tests drive each page like a user (a crash in background tasks was found and fixed this way) |
 | M13 🟡 | **Reproducibility and export:** `fungus archive` bundles (hash manifest + package versions) with `--verify`, `fungus sensitivity` (how much each debatable setting moves the result, in units of the reported uncertainty), vector figures and a residual panel | A colleague reproduces a result from the bundle alone *(bundles and checks work; not yet tried by another person on another machine)* |
+| M15 ✅ | **Planning, model hygiene and a demo:** rates, lag and time-to-level with bootstrap intervals and 95% bands on the charts; `fungus power` (replicates needed, simulating the study's own Welch test); `fungus models` registry with `unfamiliar_input` drift warnings; resumable training with early stopping; `fungus demo` | Checked against theory and by simulation: band coverage 91–94% (independent errors), power matches the noncentral t, resumed training gives the same weights. The demo exposed and fixed a false "blurry" flag caused by growth itself |
 | M14 🟡 | **Long runs and the field:** several cameras measured separately and combined, capture heartbeat + `fungus health` with webhook/command alerts, `fungus service install`, `fungus import --watch` for synced photos | An unattended field run reports its own problems *(code done; the service registration and webhook alerts are untested against a real OS service and a real endpoint)* |
 
 ---
@@ -230,6 +232,6 @@ Everything below was added after the first plan, to make the results publishable
 5. ~~How precise~~ — paper-level, so markers and calibration are required and every result carries an uncertainty and a record of how it was produced.
 
 **Open now:**
-- How many replicates per condition? That decides whether the two-stage tests in `fungus study` have any power (with 2–3 they barely do).
+- How many replicates per condition? `fungus power` now answers this from a pilot study's spread; it needs a pilot.
 - Which metric is the headline for each use case, so the validation suite can hold it to a bound.
 - Whether to keep the raw photos in the reproducibility bundle or deposit them separately (only their hashes are in the bundle by default).

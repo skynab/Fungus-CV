@@ -27,12 +27,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fungus_cv.gui import theme
 from fungus_cv.gui.chart import ChartLabel
 from fungus_cv.gui.pages.report import METRICS
 from fungus_cv.gui.qt_util import preload_model_modules, run_task
 
-STATUS_COLORS = {"pass": QColor(20, 130, 60), "fail": QColor(176, 0, 32),
-                 "error": QColor(176, 0, 32), "info": QColor(110, 110, 110)}
+STATUS_COLORS = {"pass": QColor(theme.GOOD), "fail": QColor(theme.BAD),
+                 "error": QColor(theme.BAD), "info": QColor(theme.MUTED)}
 
 
 def _file_row(line: QLineEdit, title: str, pattern: str) -> QHBoxLayout:
@@ -102,6 +103,7 @@ class ValidationPage(QWidget):
         new_suite.clicked.connect(self._choose_new_suite)
         self.save_baseline = QCheckBox("Save these numbers as the baseline")
         self.suite_btn = QPushButton("Run validation suite")
+        theme.mark_primary(self.suite_btn)
         self.suite_btn.clicked.connect(self.run_suite)
         self.suite_summary = QLabel()
         self.suite_summary.setWordWrap(True)
@@ -302,7 +304,7 @@ class ValidationPage(QWidget):
             for col, value in enumerate(row):
                 item = QTableWidgetItem(value)
                 if col == 5:
-                    item.setForeground(STATUS_COLORS.get(value, QColor(0, 0, 0)))
+                    item.setForeground(STATUS_COLORS.get(value, QColor(theme.TEXT)))
                 self.suite_table.setItem(r, col, item)
         self.suite_table.resizeColumnsToContents()
 

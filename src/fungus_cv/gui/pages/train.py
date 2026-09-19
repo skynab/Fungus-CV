@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fungus_cv.gui import theme
 from fungus_cv.gui.chart import ChartLabel
 from fungus_cv.gui.qt_util import preload_model_modules, run_task
 from fungus_cv.gui.theme import SERIES
@@ -130,6 +131,7 @@ class TrainPage(QWidget):
         sform.addRow("Stop early after", self.patience)
 
         self.start_btn = QPushButton("Start training")
+        theme.mark_primary(self.start_btn)
         self.start_btn.clicked.connect(self.start)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.clicked.connect(self.cancel)

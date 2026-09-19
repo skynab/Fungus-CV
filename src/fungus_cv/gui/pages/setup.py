@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fungus_cv.gui import theme
 from fungus_cv.gui.image_view import ImageView
 from fungus_cv.gui.qt_util import run_task
 
@@ -106,6 +107,7 @@ class SetupPage(QWidget):
         cl.addWidget(self.save_colors_btn)
 
         self.save_btn = QPushButton("Save measurement setup")
+        theme.mark_primary(self.save_btn)
         self.save_btn.clicked.connect(self.save_annotations)
         self.reload_btn = QPushButton("Reload frame")
         self.reload_btn.clicked.connect(self.load)

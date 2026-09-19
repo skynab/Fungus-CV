@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fungus_cv.gui import theme
 from fungus_cv.gui.chart import ChartLabel
 from fungus_cv.gui.pages.report import METRICS
 from fungus_cv.gui.qt_util import run_task
@@ -130,6 +131,7 @@ class StudyPage(QWidget):
         self.save_btn = QPushButton("Save study")
         self.save_btn.clicked.connect(self.save)
         self.run_btn = QPushButton("Run study")
+        theme.mark_primary(self.run_btn)
         self.run_btn.clicked.connect(self.run)
         self.folder_btn = QPushButton("Open results folder")
         self.folder_btn.clicked.connect(self._open_results)

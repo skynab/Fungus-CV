@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fungus_cv.gui import theme
 from fungus_cv.gui.image_view import ImageView
 from fungus_cv.gui.qt_util import preload_model_modules, run_task
 
@@ -54,6 +55,7 @@ class AnalyzePage(QWidget):
         self._analyzer = None  # for aligned frames; built on first use
 
         self.run_btn = QPushButton("Run analysis")
+        theme.mark_primary(self.run_btn)
         self.run_btn.clicked.connect(self.run)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.clicked.connect(self.cancel)

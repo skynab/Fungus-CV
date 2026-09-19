@@ -7,6 +7,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView
 
+from fungus_cv.gui import theme
 from fungus_cv.gui.qt_util import bgr_to_pixmap
 
 
@@ -34,7 +35,7 @@ class ImageView(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setDragMode(QGraphicsView.NoDrag)
         self.setMouseTracking(True)
-        self.setBackgroundBrush(QColor(40, 40, 40))
+        self.setBackgroundBrush(QColor(theme.NEUTRAL[900]))
         self._pixmap_item = QGraphicsPixmapItem()
         self._pixmap_item.setTransformationMode(Qt.SmoothTransformation)
         # Pixel (0, 0) covers [-0.5, 0.5]: shift so scene coordinates equal pixel coordinates.

@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from PySide6.QtWidgets import QApplication
 
+    from fungus_cv.gui import theme
     from fungus_cv.gui.main_window import MainWindow
     from fungus_cv.gui.qt_util import APP_NAME, ORG_NAME, setup_logging
     from fungus_cv.gui.state import AppState
@@ -30,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     QApplication.setApplicationName(APP_NAME)
     QApplication.setOrganizationName(ORG_NAME)
     app = QApplication.instance() or QApplication(argv)
+    theme.apply(app)
     log_handler = setup_logging()
     window = MainWindow(AppState(), log_handler)
     window.show()

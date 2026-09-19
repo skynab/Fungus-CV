@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fungus_cv.gui import theme
 from fungus_cv.gui.image_view import ImageView
 from fungus_cv.gui.qt_util import run_task
 
@@ -70,6 +71,7 @@ class ReportPage(QWidget):
         self.vector = QCheckBox("Also save PDF and SVG (for papers)")
         self.video = QCheckBox("Also make an overlay video")
         self.make_btn = QPushButton("Make report")
+        theme.mark_primary(self.make_btn)
         self.make_btn.clicked.connect(self.make)
         self.folder_btn = QPushButton("Open report folder")
         self.folder_btn.clicked.connect(self.open_folder)

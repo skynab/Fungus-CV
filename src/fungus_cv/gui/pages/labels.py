@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fungus_cv.gui import theme
 from fungus_cv.gui.image_view import ImageView
 from fungus_cv.gui.pages.prompt import SAM_MODELS
 from fungus_cv.gui.qt_util import preload_model_modules, run_task
@@ -201,6 +202,7 @@ class LabelsPage(QWidget):
         undo = QPushButton("Undo (Z)")
         undo.clicked.connect(self.undo)
         self.save_btn = QPushButton("Save — mark reviewed (S)")
+        theme.mark_primary(self.save_btn)
         self.save_btn.clicked.connect(self.save_item)
         prev_btn = QPushButton("◀ Previous (A)")
         prev_btn.clicked.connect(lambda: self.go(-1))

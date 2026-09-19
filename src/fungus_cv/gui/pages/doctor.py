@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fungus_cv.gui import theme
 from fungus_cv.gui.qt_util import log_dir, run_task
 
 
@@ -24,6 +25,7 @@ class DoctorPage(QWidget):
         super().__init__()
         self.state = state
         self.run_btn = QPushButton("Run checks")
+        theme.mark_primary(self.run_btn)
         self.run_btn.clicked.connect(lambda: self.run(request=False))
         self.ask_btn = QPushButton("Ask for camera permission")
         self.ask_btn.clicked.connect(lambda: self.run(request=True))
@@ -78,7 +80,7 @@ class DoctorPage(QWidget):
         self.run_btn.setEnabled(True)
         self.ask_btn.setEnabled(True)
         self.table.setRowCount(len(checks))
-        colors = {True: QColor(0, 130, 60), False: QColor(180, 0, 30), None: None}
+        colors = {True: QColor(theme.GOOD), False: QColor(theme.BAD), None: None}
         for i, check in enumerate(checks):
             mark = {True: "✓ ", False: "✗ ", None: ""}[check.ok]
             name = QTableWidgetItem(mark + check.name)

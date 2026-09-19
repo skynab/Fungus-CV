@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fungus_cv.gui import theme
 from fungus_cv.gui.image_view import ImageView
 from fungus_cv.gui.qt_util import run_task
 from fungus_cv.quality import mean_brightness, sharpness
@@ -88,6 +89,7 @@ class CameraPage(QWidget):
         self.use_experiment = QCheckBox("Use the experiment's camera settings")
         self.use_experiment.setChecked(True)
         self.start_btn = QPushButton("Start preview")
+        theme.mark_primary(self.start_btn)
         self.start_btn.clicked.connect(self.toggle_preview)
         self.snapshot_btn = QPushButton("Save snapshot")
         self.snapshot_btn.clicked.connect(self.save_snapshot)
@@ -128,7 +130,7 @@ class CameraPage(QWidget):
         self.refresh_btn.setEnabled(not capturing)
 
     def _say(self, text: str, warn: bool = True) -> None:
-        color = "#b00020" if warn else "palette(text)"
+        color = theme.BAD if warn else theme.TEXT
         self.message.setText(f"<span style='color:{color}'>{text}</span>" if text else "")
 
     # --- devices -----------------------------------------------------------------------
@@ -228,7 +230,7 @@ class CameraPage(QWidget):
     def _show_frame(self, image: np.ndarray, stats: dict) -> None:
         if self.thread is not None:
             self.thread.waiting_for_display = False
-        if self.message.text().startswith("<span style='color:palette(text)'>Opening"):
+        if self.message.text().startswith(f"<span style='color:{theme.TEXT}'>Opening"):
             self._say("")
         self.last_frame = image
         shown = image

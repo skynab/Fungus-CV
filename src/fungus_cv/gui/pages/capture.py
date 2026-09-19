@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from fungus_cv.config import parse_duration
+from fungus_cv.gui import theme
 from fungus_cv.gui.chart import ChartLabel
 from fungus_cv.gui.image_view import ImageView
 from fungus_cv.gui.pages.experiment import _fmt_seconds
@@ -90,6 +91,7 @@ class CapturePage(QWidget):
         form.addRow(QLabel("These override config.yaml for this run only."))
 
         self.start_btn = QPushButton("Start capture")
+        theme.mark_primary(self.start_btn)
         self.start_btn.clicked.connect(self.start)
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.clicked.connect(self.stop)

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from fungus_cv.config import ExperimentConfig, parse_duration, set_yaml_value
+from fungus_cv.gui import theme
 
 
 def _combo(options: list[str]) -> QComboBox:
@@ -147,6 +148,7 @@ class ExperimentPage(QWidget):
         form.addRow("Measure along", self.f_mode)
         form.addRow("Path from", self.f_path_source)
         self.save_btn = QPushButton("Save settings")
+        theme.mark_primary(self.save_btn)
         self.save_btn.clicked.connect(self.save_settings)
         form.addRow("", self.save_btn)
 

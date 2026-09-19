@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from fungus_cv.gui import theme
 from fungus_cv.gui.image_view import ImageView
 from fungus_cv.gui.qt_util import preload_model_modules, run_task
 
@@ -58,6 +59,7 @@ class PromptPage(QWidget):
         clear = QPushButton("Clear")
         clear.clicked.connect(self.clear)
         self.save_btn = QPushButton("Save prompt for this frame")
+        theme.mark_primary(self.save_btn)
         self.save_btn.clicked.connect(self.save_prompt)
         self.remove_btn = QPushButton("Remove this frame's prompt")
         self.remove_btn.clicked.connect(self.remove_prompt)

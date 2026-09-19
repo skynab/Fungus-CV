@@ -171,10 +171,10 @@ QLabel:disabled {{ color: {disabled}; }}
 /* panels */
 QGroupBox {{
     background: {SURFACE}; border: 1px solid {NEUTRAL[800]}; border-radius: {RADIUS}px;
-    margin-top: 0; padding: 36px 12px 14px 12px; font-size: 14px; font-weight: 500;
+    margin-top: 0; padding: 32px 10px 10px 10px; font-size: 14px; font-weight: 500;
 }}
 QGroupBox::title {{
-    subcontrol-origin: padding; subcontrol-position: top left; left: 12px; top: 11px;
+    subcontrol-origin: padding; subcontrol-position: top left; left: 12px; top: 9px;
     color: {TEXT}; background: transparent;
 }}
 QGroupBox::title:disabled {{ color: {disabled}; }}

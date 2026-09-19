@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QStackedWidget,
     QStyle,
@@ -240,7 +241,13 @@ class MainWindow(QMainWindow):
         page_area = QWidget()
         page_layout = QVBoxLayout(page_area)
         page_layout.setContentsMargins(14, 0, 14, 6)
-        page_layout.addWidget(self.stack)
+        # A page taller or wider than the window scrolls, so the window can always be made
+        # small enough for the screen (and moved: macOS pins a window taller than the screen).
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(self.stack)
+        page_layout.addWidget(scroll)
         main = QWidget()
         main_layout = QVBoxLayout(main)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -340,6 +347,12 @@ class MainWindow(QMainWindow):
         if row not in self._row_to_page:
             return  # a section header
         self.stack.setCurrentIndex(self._row_to_page[row])
+        # Size the stack for the page on show only, not for the largest page.
+        for index in range(self.stack.count()):
+            policy = QSizePolicy.Preferred if index == self.stack.currentIndex() \
+                else QSizePolicy.Ignored
+            self.stack.widget(index).setSizePolicy(policy, policy)
+        self.stack.adjustSize()
         self._update_heading()
         page = self.stack.currentWidget()
         if hasattr(page, "on_shown"):

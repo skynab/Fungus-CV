@@ -56,6 +56,9 @@ class SetupPage(QWidget):
         self.view = ImageView()
         self.view.clicked.connect(self._clicked)
         self.view.dragged.connect(self._dragged)
+        self.view.handle_moved.connect(self._handle_moved)
+        # view.handles[i] is the point at index j of the list in _handle_refs[i]
+        self._handle_refs: list[tuple[list, int]] = []
         self.hint = QLabel()
         self.hint.setWordWrap(True)
         self.message = QLabel()
@@ -191,8 +194,9 @@ class SetupPage(QWidget):
         self.frame_label.setText(f"1 / {n} (reference)")
         self._load_annotations()
         self.message.setText(
-            "Reference frame loaded. Scroll to zoom, Option/Alt-drag to pan, double-click to "
-            "fit. Right-click removes the last point.")
+            "Reference frame loaded. Scroll to zoom, middle-drag or Option/Alt-drag to pan, "
+            "Fit (or double-click) to see the whole frame. Drag a point to move it; "
+            "right-click removes the last point.")
         self._redraw()
 
     def _frame_selected(self) -> None:
@@ -242,6 +246,7 @@ class SetupPage(QWidget):
         self.hint.setText(next(h for k, _, h in TOOLS if k == key))
         self.view.drag_enabled = key == "color"
         self.finish_plot_btn.setVisible(key == "plot")
+        self._redraw()  # points are draggable with every tool except colour boxes
 
     def _clicked(self, x: float, y: float, button: int) -> None:
         if self.frame is None:
@@ -274,6 +279,14 @@ class SetupPage(QWidget):
             self.color_boxes.append((xa, ya, xb, yb))
             self._update_color_preview()
             self._redraw()
+
+    def _handle_moved(self, index: int, x: float, y: float, phase: int) -> None:
+        if self.frame is None or not 0 <= index < len(self._handle_refs):
+            return
+        points, j = self._handle_refs[index]
+        h, w = self.frame.shape[:2]
+        points[j] = (float(np.clip(x, 0, w - 1)), float(np.clip(y, 0, h - 1)))
+        self._redraw()
 
     def undo(self) -> None:
         key = self.tool()
@@ -353,14 +366,22 @@ class SetupPage(QWidget):
         v.add_points(self.points["roi"], COLORS["roi"], 3)
         v.add_polyline(self.points["patch"], COLORS["patch"],
                        closed=len(self.points["patch"]) > 2)
+        v.add_points(self.points["patch"], COLORS["patch"], 3)
         for name, poly in self.plots:
             v.add_polyline(poly, COLORS["plot"], closed=True)
+            v.add_points(poly, COLORS["plot"], 3)
             v.add_label(name, *np.mean(poly, axis=0))
         v.add_polyline(self.current_plot, COLORS["plot"], dashed=True)
         v.add_points(self.current_plot, COLORS["plot"], 3)
         for xa, ya, xb, yb in self.color_boxes:
             v.add_polyline([(xa, ya), (xb, ya), (xb, yb), (xa, yb)], (255, 255, 0), closed=True,
                            width=1, dashed=True)
+        # Every placed point can be dragged to a new position (not while drawing colour boxes).
+        lists = [self.points[k] for k in ("base", "path", "roi", "patch")]
+        lists += [poly for _, poly in self.plots] + [self.current_plot]
+        self._handle_refs = ([] if self.tool() == "color" else
+                             [(pts, j) for pts in lists for j in range(len(pts))])
+        v.handles = [pts[j] for pts, j in self._handle_refs]
 
     # --- colour ------------------------------------------------------------------------------
 

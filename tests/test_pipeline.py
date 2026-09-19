@@ -145,3 +145,19 @@ def test_report_cli_rejects_unknown_format(experiment):
     analyze(Experiment(experiment.root))
     result = CliRunner().invoke(app, ["report", str(experiment.root), "--format", "eps"])
     assert result.exit_code == 1 and "unknown figure format" in result.output
+
+
+def test_frames_deleted_by_hand_are_skipped(experiment):
+    """Removing bad photos from frames/ must not stop Setup/Analyze from loading."""
+    from fungus_cv.analyze.pipeline import AnalysisError, frames_for_analysis
+
+    build_experiment(experiment, minutes=range(0, 4), bump_at=-1)
+    exp = Experiment(experiment.root)
+    rows = frames_for_analysis(exp)
+    (exp.root / rows[0]["file"]).unlink()
+    remaining = frames_for_analysis(exp)
+    assert [r["file"] for r in remaining] == [r["file"] for r in rows[1:]]
+    for r in remaining:
+        (exp.root / r["file"]).unlink()
+    with pytest.raises(AnalysisError, match="all missing"):
+        frames_for_analysis(exp)

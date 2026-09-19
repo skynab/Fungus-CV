@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -83,6 +84,19 @@ def _default_opener(index: int, backend_id: int) -> Any:
     return cv2.VideoCapture(index, backend_id)
 
 
+# One lock per device index, held from open() to close(). Two threads touching the same
+# device at once (e.g. a preview still closing while a capture opens it) crashes some
+# drivers (DirectShow: access violation / heap corruption), so the second one waits.
+_DEVICE_LOCKS: dict[int, threading.Lock] = {}
+_DEVICE_LOCKS_GUARD = threading.Lock()
+DEVICE_WAIT_SECONDS = 10.0
+
+
+def _device_lock(index: int) -> threading.Lock:
+    with _DEVICE_LOCKS_GUARD:
+        return _DEVICE_LOCKS.setdefault(index, threading.Lock())
+
+
 class Camera:
     """One physical camera. ``open()`` applies the configured format and controls."""
 
@@ -92,6 +106,7 @@ class Camera:
         self._opener = opener
         self._sleep = sleep
         self._cap: Any = None
+        self._lock_held: threading.Lock | None = None
         # Values captured for controls set to "lock"; reused on every reopen.
         self.locked: dict[str, float] = {}
         # Controls this camera/driver cannot lock; left on auto without retrying.
@@ -106,14 +121,26 @@ class Camera:
         if self._cap is not None:
             return
         cfg = self.config
-        cap = self._opener(cfg.index, BACKEND_IDS[self.backend])
-        if cap is None or not cap.isOpened():
-            if cap is not None:
-                cap.release()
+        lock = _device_lock(cfg.index)
+        if not lock.acquire(timeout=DEVICE_WAIT_SECONDS):
             raise CameraError(
-                f"could not open camera {cfg.name!r} (index {cfg.index}, backend {self.backend})"
+                f"camera {cfg.name!r} (index {cfg.index}) is in use by another part of the app "
+                "(close the live preview or stop the capture first)"
             )
+        try:
+            cap = self._opener(cfg.index, BACKEND_IDS[self.backend])
+            if cap is None or not cap.isOpened():
+                if cap is not None:
+                    cap.release()
+                raise CameraError(
+                    f"could not open camera {cfg.name!r} (index {cfg.index}, "
+                    f"backend {self.backend})"
+                )
+        except BaseException:
+            lock.release()
+            raise
         self._cap = cap
+        self._lock_held = lock
         try:
             self._apply_format()
             self._apply_controls()
@@ -136,8 +163,20 @@ class Camera:
 
     def close(self) -> None:
         if self._cap is not None:
-            self._cap.release()
-            self._cap = None
+            try:
+                self._cap.release()
+            finally:
+                self._cap = None
+                if self._lock_held is not None:
+                    self._lock_held.release()
+                    self._lock_held = None
+
+    def __del__(self) -> None:
+        # A camera dropped without close() must not keep the device locked for the process.
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __enter__(self) -> Camera:
         self.open()
@@ -276,8 +315,12 @@ def list_cameras(
     resolved = resolve_backend(backend)
     found = []
     for index in range(max_index):
-        cap = opener(index, BACKEND_IDS[resolved])
+        lock = _device_lock(index)
+        if not lock.acquire(timeout=DEVICE_WAIT_SECONDS):
+            continue  # held open by a preview or capture in this process
+        cap = None
         try:
+            cap = opener(index, BACKEND_IDS[resolved])
             if cap is None or not cap.isOpened():
                 continue
             ok, frame = cap.read()
@@ -294,4 +337,5 @@ def list_cameras(
         finally:
             if cap is not None:
                 cap.release()
+            lock.release()
     return found

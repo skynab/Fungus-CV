@@ -2,6 +2,7 @@
 
 import json
 import plistlib
+import sys
 from datetime import timedelta
 
 import pytest
@@ -130,8 +131,11 @@ def test_alerts_go_to_a_webhook_and_a_command(running, tmp_path, monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     marker = tmp_path / "alert.txt"
+    # Echo the variable with this interpreter: Windows' shell has no `printenv`.
+    code = "import os; print(os.environ['FUNGUS_SUMMARY'])"
+    echo = f'"{sys.executable}" -c "{code}"'
     errors = health.notify(report, "problem", webhook="https://example.invalid/hook",
-                           command=f'printenv FUNGUS_SUMMARY > "{marker}"')
+                           command=f'{echo} > "{marker}"')
     assert errors == []
     assert sent["url"].endswith("/hook") and sent["body"]["event"] == "problem"
     assert sent["body"]["text"] == report.summary() and sent["body"]["checks"]

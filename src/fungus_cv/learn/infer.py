@@ -48,14 +48,15 @@ _CACHE: dict[tuple[str, str], LoadedModel] = {}
 
 
 def load_trained(path: Path, device_pref: str = "auto") -> LoadedModel:
-    torch = import_torch()
-    from fungus_cv.learn.unet import ResNetUNet
-
     path = Path(path)
     card_path, weights_path = path / CARD_NAME, path / WEIGHTS_NAME
+    # Check the folder before importing torch, so a wrong path says so even without torch.
     if not card_path.exists() or not weights_path.exists():
         raise FileNotFoundError(f"{path} is not a trained model folder (needs {CARD_NAME} "
                                 f"and {WEIGHTS_NAME}; create one with `fungus train`)")
+    torch = import_torch()
+    from fungus_cv.learn.unet import ResNetUNet
+
     device, _ = choose_device(device_pref)
     key = (str(path.resolve()), str(device))
     digest = hashlib.sha256(weights_path.read_bytes()).hexdigest()

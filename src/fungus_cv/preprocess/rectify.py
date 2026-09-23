@@ -146,5 +146,7 @@ def fit_rectification(
                     int(out_w), int(out_h), 1 / shrink)
     shift = np.array([[shrink, 0, -lo[0] * shrink], [0, shrink, -lo[1] * shrink], [0, 0, 1]])
     matrix = shift @ hm
-    size = (max(1, int(np.ceil(out_w * shrink))), max(1, int(np.ceil(out_h * shrink))))
+    # Clamp as well as round up: ceil() of a shrunk side can land one pixel over the limit.
+    size = (min(max_side_px, max(1, int(np.ceil(out_w * shrink)))),
+            min(max_side_px, max(1, int(np.ceil(out_h * shrink)))))
     return Rectification(matrix / matrix[2, 2], size, px_per_mm * shrink, rms_mm, len(ids))

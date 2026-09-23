@@ -10,6 +10,7 @@ dist/Fungus-CV/Fungus-CV (Linux).
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,15 @@ def main() -> None:
     parser.add_argument("--with-models", action="store_true",
                         help="bundle PyTorch/transformers for SAM 2 and trained models")
     args = parser.parse_args()
+    if args.with_models:
+        # PyInstaller bundles what it can import: without these the build quietly produces an
+        # app whose SAM prompts and model-based analysis fail at runtime.
+        missing = [p for p in ("torch", "torchvision", "transformers")
+                   if importlib.util.find_spec(p) is None]
+        if missing:
+            sys.exit(f"--with-models needs {', '.join(missing)} in this environment: "
+                     'pip install -e ".[sam]" (with an NVIDIA GPU, install the CUDA build of '
+                     "torch first)")
 
     subprocess.run([sys.executable, str(PACKAGING / "make_icon.py")], check=True)
     spec_path = PACKAGING / "build" / "Fungus-CV.spec"

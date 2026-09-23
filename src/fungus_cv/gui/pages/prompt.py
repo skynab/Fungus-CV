@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from fungus_cv.gui import theme
 from fungus_cv.gui.image_view import ImageView
 from fungus_cv.gui.qt_util import preload_model_modules, run_task
+from fungus_cv.segment.torch_device import missing_dependency
 
 SAM_MODELS = ["facebook/sam2.1-hiera-tiny", "facebook/sam2.1-hiera-small",
               "facebook/sam2.1-hiera-base-plus", "facebook/sam2.1-hiera-large"]
@@ -325,8 +326,8 @@ class PromptPage(QWidget):
         preload_model_modules({"sam2"})
         try:
             segmenter = self._segmenter()
-        except ImportError as exc:
-            self._failed(f'SAM 2 needs PyTorch and transformers: pip install -e ".[sam]" ({exc})')
+        except Exception as exc:  # noqa: BLE001 - shown on the page, not raised at the user
+            self._failed(missing_dependency(exc) or f"{type(exc).__name__}: {exc}")
             return
         run_task(lambda p, s: (prompt, segmenter.segment_single(frame, prompt)),
                  self._preview_done, self._failed)

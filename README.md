@@ -39,8 +39,13 @@ Fungus-CV has a desktop app with a page for each step, grouped in the sidebar:
 
 ```bash
 pip install -e ".[gui]"
+pip install -e ".[sam]"          # only for SAM prompts and trained models; see Install
 fungus gui                       # or: fungus gui experiments/dye-test-1
 ```
+
+Colour-threshold measurement needs nothing beyond `[gui]`. The **SAM prompts** page, and
+**Analyze** or **Train models** with `method: sam2` or `method: model`, need PyTorch and
+transformers; without them those pages say what to install and nothing else is affected.
 
 To build a standalone app (`Fungus-CV.app` on macOS, `Fungus-CV.exe` on Windows), see [packaging/README.md](packaging/README.md). **On macOS, the packaged app is the most reliable way to use the camera.** It has its own entry under Privacy & Security → Camera, and macOS asks for permission the first time. When `fungus` runs from a terminal, the permission belongs to that terminal app instead.
 
@@ -52,9 +57,17 @@ Everything in the app can also be done from the command line below, which is han
 python -m venv .venv
 # Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev]"
+pip install -e ".[sam]"   # SAM 2 and trained models (PyTorch + transformers, a big download)
 ```
 
 (With [uv](https://docs.astral.sh/uv/): `uv venv && uv pip install -e ".[dev]"`.)
+
+The extras are separate because PyTorch is a large download that colour-threshold
+measurement does not need. Install `[sam]` if you will use the **SAM prompts** page,
+`method: sam2` or `method: model`; **with an NVIDIA GPU, install the CUDA build of PyTorch
+first** (the command from <https://pytorch.org/get-started/locally/>), because `[sam]` on
+its own installs the CPU-only build. `fungus doctor` and the app's Diagnostics page report
+which of these are present.
 
 ## Quick start
 

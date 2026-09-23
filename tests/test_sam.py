@@ -222,3 +222,23 @@ def test_sam2_threshold_variants_nest(experiment):
     assert not (tight & ~mask).any() and not (mask & ~loose).any()
     rows = read_measurements(exp)
     assert all(r["extent_mm_seg_unc"] != "" for r in rows)
+
+
+# --- missing dependencies ----------------------------------------------------------------
+
+
+def test_a_missing_model_package_is_explained_not_just_named():
+    """Whatever import fails, the user is told what to install."""
+    from fungus_cv.segment.torch_device import (
+        INSTALL_HINT,
+        MissingDependency,
+        missing_dependency,
+    )
+
+    for name in ("torch", "torchvision", "transformers", "torch.nn"):
+        exc = ModuleNotFoundError(f"No module named {name!r}", name=name)
+        assert missing_dependency(exc) == INSTALL_HINT
+    assert missing_dependency(MissingDependency("already explained")) == "already explained"
+    assert missing_dependency(ModuleNotFoundError("nope", name="pandas")) is None
+    assert missing_dependency(ValueError("unrelated")) is None
+    assert '".[sam]"' in INSTALL_HINT and "--with-models" in INSTALL_HINT

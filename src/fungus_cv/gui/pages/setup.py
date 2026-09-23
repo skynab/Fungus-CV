@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from fungus_cv.gui import theme
+from fungus_cv.gui import theme, tool_diagrams
 from fungus_cv.gui.image_view import ImageView
 from fungus_cv.gui.qt_util import run_task
 
@@ -79,6 +79,16 @@ class SetupPage(QWidget):
             tools_layout.addWidget(button)
         self.tool_group.buttonClicked.connect(lambda _: self._tool_changed())
         self.tool_group.buttons()[0].setChecked(True)
+        # A sketch of the selected tool's clicks: the words alone leave people guessing.
+        self.diagram = QLabel()
+        self.diagram.setAlignment(Qt.AlignCenter)
+        self.diagram.setFixedHeight(tool_diagrams.H)
+        self.diagram.setToolTip("An example of what to click with this tool")
+        tools_layout.addWidget(self.diagram)
+        self.tool_hint = QLabel()
+        self.tool_hint.setWordWrap(True)
+        self.tool_hint.setStyleSheet(f"color: {theme.MUTED}")
+        tools_layout.addWidget(self.tool_hint)
         undo = QPushButton("Undo last point")
         undo.clicked.connect(self.undo)
         clear = QPushButton("Clear this tool")
@@ -243,7 +253,13 @@ class SetupPage(QWidget):
 
     def _tool_changed(self) -> None:
         key = self.tool()
-        self.hint.setText(next(h for k, _, h in TOOLS if k == key))
+        hint = next(h for k, _, h in TOOLS if k == key)
+        self.hint.setText(hint)
+        self.tool_hint.setText(hint)
+        drawing = tool_diagrams.pixmap(key)
+        self.diagram.setVisible(drawing is not None)
+        if drawing is not None:
+            self.diagram.setPixmap(drawing)
         self.view.drag_enabled = key == "color"
         self.finish_plot_btn.setVisible(key == "plot")
         self._redraw()  # points are draggable with every tool except colour boxes

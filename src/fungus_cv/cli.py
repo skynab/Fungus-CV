@@ -1827,10 +1827,11 @@ def label(
     if sam:
         import importlib.util
 
+        from fungus_cv.segment.torch_device import INSTALL_HINT
+
         if importlib.util.find_spec("torch") is None or \
                 importlib.util.find_spec("transformers") is None:
-            typer.secho('--sam needs PyTorch and transformers: pip install -e ".[sam]"',
-                        fg=typer.colors.RED, err=True)
+            typer.secho(INSTALL_HINT, fg=typer.colors.RED, err=True)
             raise typer.Exit(1)
         from fungus_cv.segment.prompts import Prompts
         from fungus_cv.segment.sam2 import Sam2VideoSegmenter

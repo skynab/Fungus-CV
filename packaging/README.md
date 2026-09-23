@@ -3,8 +3,19 @@
 ```bash
 pip install -e ".[app]"                 # PySide6 + PyInstaller
 python packaging/build_app.py           # color-based methods; smaller download
-python packaging/build_app.py --with-models   # also SAM 2 / trained models (PyTorch, large)
+
+pip install -e ".[sam]"                 # PyTorch + transformers, needed for the next line
+python packaging/build_app.py --with-models   # also SAM 2 / trained models (large)
 ```
+
+PyInstaller bundles what it can import, so `--with-models` only works if `[sam]` is
+installed in the environment you build from; the build stops and says so if it is not.
+An app built **without** `--with-models` runs everything except the **SAM prompts** page
+and `method: sam2` / `method: model` in **Analyze** and **Train models**, which report the
+missing dependency. There is no way to add PyTorch to a built app afterwards -- build it
+again with `--with-models`. With an NVIDIA GPU, install the CUDA build of PyTorch before
+`[sam]` (see <https://pytorch.org/get-started/locally/>); `[sam]` alone bundles the
+CPU-only build.
 
 | OS | Output | Start it with |
 |---|---|---|

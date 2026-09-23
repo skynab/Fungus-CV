@@ -184,6 +184,43 @@ def test_image_view_drags_handles_instead_of_clicking(qtbot):
     assert len(clicks) == 1  # away from handles it is an ordinary click
 
 
+def test_every_setup_tool_shows_what_to_click(window, qtbot):
+    """Each tool on Set up measurement has its own sketch of the clicks it wants."""
+    from fungus_cv.gui.pages.setup import TOOLS
+    from fungus_cv.gui.tool_diagrams import diagram
+
+    setup = page(window, "Set up measurement")
+    seen = []
+    for key, _, _ in TOOLS:
+        assert diagram(key) is not None, key
+        for button in setup.tool_group.buttons():
+            if button.property("tool") == key:
+                button.setChecked(True)
+        setup._tool_changed()
+        assert setup.diagram.pixmap() is not None and not setup.diagram.pixmap().isNull()
+        assert setup.tool_hint.text() == setup.hint.text()
+        seen.append(setup.diagram.pixmap().toImage())
+    assert all(a != b for a, b in zip(seen, seen[1:]))  # a different drawing per tool
+    assert diagram("nonsense") is None
+
+
+def test_a_background_failure_explains_a_missing_model_package(qtbot):
+    """Pages show what a background task failed with; "No module named 'torch'" is useless."""
+    from fungus_cv.gui.qt_util import run_task
+    from fungus_cv.segment.torch_device import INSTALL_HINT
+
+    messages = []
+
+    def missing(progress, should_stop):
+        raise ModuleNotFoundError("No module named 'torch'", name="torch")
+
+    run_task(missing, None, messages.append)
+    run_task(lambda p, s: 1 / 0, None, messages.append)
+    qtbot.waitUntil(lambda: len(messages) == 2, timeout=20000)
+    assert INSTALL_HINT in messages
+    assert any(m.startswith("ZeroDivisionError") for m in messages)  # others are unchanged
+
+
 def test_open_experiment_and_save_settings(window, dye_experiment, qtbot):
     window.open_experiment(dye_experiment.root)
     assert window.state.experiment.root == dye_experiment.root

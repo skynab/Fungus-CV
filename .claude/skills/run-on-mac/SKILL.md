@@ -23,7 +23,9 @@ What it does, if you need to do it by hand:
 - `python3 -m venv .venv && .venv/bin/pip install -e ".[dev,gui]" pytest-qt` (pytest-qt is
   not in the `dev` extra; without it the GUI tests are skipped silently)
 - Models (SAM 2, U-Net training): `.venv/bin/pip install -e ".[sam]"`. PyTorch uses the Apple
-  GPU (`mps`) automatically when `device: auto`; nothing else to install.
+  GPU (`mps`) automatically when `device: auto`; nothing else to install. **Install it
+  whenever the SAM prompts page, or Analyze/Train with `method: sam2` or `method: model`,
+  will be used** — without it they report the missing dependency; colour methods are fine.
 - `.venv/bin/fungus doctor` — camera permission, cameras, window support, GPU, disk.
 
 ## 2. Pick what to run
@@ -88,9 +90,14 @@ opt-in SAM model tests and the real-image validation suite.
 ```bash
 .venv/bin/pip install -e ".[app]"
 .venv/bin/python packaging/build_app.py              # colour methods only, smaller
+.venv/bin/pip install -e ".[sam]"                    # needed for the next line
 .venv/bin/python packaging/build_app.py --with-models   # includes PyTorch (large)
 open dist/Fungus-CV.app
 ```
+
+`--with-models` bundles only what it can import, so it stops with an error unless `[sam]`
+is installed here. An app built without it reports a missing dependency on the SAM prompts
+page and for `method: sam2` / `method: model`; rebuild with `--with-models` to add them.
 
 The app has its own camera permission entry, so it is the reliable way to capture on a Mac.
 It is signed ad hoc: fine on the Mac that built it; elsewhere, right-click → Open (or sign and

@@ -25,7 +25,11 @@ import cv2
 import numpy as np
 
 from fungus_cv.segment.prompts import CropWindow, FramePrompt, Prompts
-from fungus_cv.segment.torch_device import choose_device, import_torch
+from fungus_cv.segment.torch_device import (
+    choose_device,
+    import_torch,
+    import_transformers,
+)
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +56,7 @@ class PromptError(ValueError):
 def load_model(name: str, device_pref: str = "auto"):
     """Load (and cache) the SAM 2 video model and processor. Downloads weights on first use."""
     torch = import_torch()
+    import_transformers()
     from transformers import Sam2VideoModel, Sam2VideoProcessor
 
     device, dtype = choose_device(device_pref)

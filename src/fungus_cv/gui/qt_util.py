@@ -14,6 +14,8 @@ from PySide6.QtCore import QObject, QRunnable, QStandardPaths, QThreadPool, Sign
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QMessageBox, QWidget
 
+from fungus_cv.segment.torch_device import missing_dependency
+
 APP_NAME = "Fungus-CV"
 ORG_NAME = "Fungus-CV"
 
@@ -101,8 +103,10 @@ class Task(QRunnable):
         except Exception as exc:  # report every failure to the UI instead of dying silently
             logging.getLogger(__name__).error("background task failed:\n%s",
                                               traceback.format_exc())
+            # "No module named 'torch'" means nothing to a user; say what to install.
+            message = missing_dependency(exc) or f"{type(exc).__name__}: {exc}"
             try:
-                self.signals.failed.emit(f"{type(exc).__name__}: {exc}")
+                self.signals.failed.emit(message)
             except RuntimeError:
                 pass
             return

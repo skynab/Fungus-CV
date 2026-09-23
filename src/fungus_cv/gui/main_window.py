@@ -561,6 +561,7 @@ class MainWindow(QMainWindow):
         for _, page in self.pages:
             if hasattr(page, "shutdown"):
                 page.shutdown()
+        self.state.preview.stop()  # the pages share it; it must not outlive the window
         event.accept()
 
     def keyPressEvent(self, event):  # noqa: N802

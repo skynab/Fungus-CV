@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, Signal
 
+from fungus_cv.gui.preview import CameraPreview
 from fungus_cv.storage import Experiment
 
 MAX_RECENT = 10
@@ -23,6 +24,8 @@ class AppState(QObject):
         self.experiment: Experiment | None = None
         self.camera: str | None = None  # with several cameras, the one being worked on
         self.capturing = False
+        # One live preview for the whole window (a camera serves one reader at a time).
+        self.preview = CameraPreview(self)
 
     # --- experiments -------------------------------------------------------------------
 
@@ -61,7 +64,9 @@ class AppState(QObject):
         return None if self.experiment is None else results_dir_for(self.experiment, self.camera)
 
     def set_capturing(self, value: bool) -> None:
-        self.capturing = value
+        self.capturing = value  # set first: stopping the preview below tells the pages
+        if value:
+            self.preview.stop()  # the capture needs the camera the preview holds open
         self.busy_changed.emit(value)
 
     # --- recent folders ------------------------------------------------------------------

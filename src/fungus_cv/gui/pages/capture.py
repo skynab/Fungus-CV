@@ -27,13 +27,17 @@ from PySide6.QtWidgets import (
 from fungus_cv.config import parse_duration
 from fungus_cv.gui import theme
 from fungus_cv.gui.chart import ChartLabel
-from fungus_cv.gui.image_view import ImageView
+from fungus_cv.gui.image_view import ImageView, ViewControls
 from fungus_cv.gui.pages.experiment import _fmt_seconds
 from fungus_cv.gui.pages.report import METRICS
+from fungus_cv.gui.preview import camera_config
 from fungus_cv.gui.qt_util import preload_model_modules, run_task
 from fungus_cv.gui.theme import INK_2, SERIES
 
 log = logging.getLogger(__name__)
+
+PREVIEW_HINT = ("The live camera, to frame and focus before starting. Shared with "
+                "the Camera page; a capture takes the camera over.")
 
 
 class CaptureThread(QThread):
@@ -68,6 +72,7 @@ class CapturePage(QWidget):
     def __init__(self, state, log_handler=None):
         super().__init__()
         self.state = state
+        self.preview = state.preview  # shared with the Camera page
         self.thread: CaptureThread | None = None
         self.started_at = 0.0
         self._last_count = -1
@@ -146,6 +151,7 @@ class CapturePage(QWidget):
         left.addWidget(self.log, 1)
         self.right_tabs = QTabWidget()
         self.right_tabs.addTab(self.last_image, "Latest frame")
+        self.right_tabs.addTab(self._preview_tab(), "Live preview")
         live_tab = QWidget()
         live_layout = QVBoxLayout(live_tab)
         live_layout.addWidget(self.live_chart, 1)
@@ -162,7 +168,61 @@ class CapturePage(QWidget):
             log_handler.record.connect(self._log_line)
         state.experiment_changed.connect(lambda _: self.refresh())
         state.config_changed.connect(self.refresh)
+        state.busy_changed.connect(lambda _: self._preview_running_changed(
+            self.preview.running))
+        self.preview.frame.connect(self._show_preview_frame)
+        self.preview.failed.connect(self._preview_failed)
+        self.preview.running_changed.connect(self._preview_running_changed)
         self.refresh()
+
+    def _preview_tab(self) -> QWidget:
+        """The same live view as the Camera page, for framing while the run is set up."""
+        self.preview_view = ImageView()
+        self.preview_view.set_nav_mode(ImageView.PAN)
+        self.preview_btn = QPushButton("Start preview")
+        self.preview_btn.clicked.connect(self._toggle_preview)
+        self.preview_status = QLabel(PREVIEW_HINT)
+        self.preview_status.setWordWrap(True)
+        self.preview_tab = tab = QWidget()
+        layout = QVBoxLayout(tab)
+        row = QHBoxLayout()
+        row.addWidget(self.preview_btn)
+        row.addWidget(ViewControls(self.preview_view))
+        row.addStretch()
+        layout.addLayout(row)
+        layout.addWidget(self.preview_status)
+        layout.addWidget(self.preview_view, 1)
+        return tab
+
+    # --- live preview ----------------------------------------------------------------------
+
+    def _toggle_preview(self) -> None:
+        if self.preview.running:
+            self.preview.stop()
+        elif not self.state.capturing:
+            self.preview.start(camera_config(self.state))
+            self.preview_status.setText("Opening camera…")
+            self.right_tabs.setCurrentWidget(self.preview_tab)
+
+    def _preview_running_changed(self, running: bool) -> None:
+        self.preview_btn.setText("Stop preview" if running else "Start preview")
+        self.preview_btn.setEnabled(not self.state.capturing)
+        if not running:
+            self.preview_status.setText(
+                "Paused while the capture has the camera." if self.state.capturing
+                else PREVIEW_HINT)
+
+    def _preview_failed(self, message: str) -> None:
+        self.preview_status.setText(
+            f"<span style='color:{theme.BAD}'>{html.escape(message)}</span>")
+
+    def _show_preview_frame(self, image, stats: dict) -> None:
+        if not self.isVisible():
+            return  # the Camera page is showing it; on_shown catches this view up
+        self.preview_view.set_image(image, keep_view=True)
+        h, w = image.shape[:2]
+        self.preview_status.setText(f"{w}×{h}   brightness {stats['brightness']:.0f}   "
+                                    f"sharpness {stats['sharpness']:.0f}")
 
     def _log_line(self, text: str, level: int) -> None:
         if self.thread is not None or level >= logging.WARNING:
@@ -171,6 +231,11 @@ class CapturePage(QWidget):
     def on_shown(self) -> None:
         if self.thread is None:
             self.refresh()
+        self._preview_running_changed(self.preview.running)
+        if self.preview.running:
+            self.right_tabs.setCurrentWidget(self.preview_tab)
+        if self.preview.last_frame is not None:
+            self._show_preview_frame(self.preview.last_frame, self.preview.last_stats)
 
     def refresh(self) -> None:
         exp = self.state.experiment
@@ -207,6 +272,7 @@ class CapturePage(QWidget):
             self.status.setText(f"<span style='color:#b00020'>{exc}</span>")
             return
         exp.config.capture.max_frames = self.max_frames.value() or None
+        self.preview.stop()  # the preflight below opens the same camera
         self.start_btn.setEnabled(False)
         self.status.setText("Checking camera permission and opening cameras…")
 

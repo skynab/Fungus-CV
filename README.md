@@ -25,8 +25,8 @@ Fungus-CV has a desktop app with a page for each step, grouped in the sidebar:
 | Section | Page | What it does |
 |---|---|---|
 | Capture | **Experiment** | open or create an experiment, key settings |
-| | **Camera** | live preview for framing and focus |
-| | **Capture** | scheduled photos with progress; optionally **measures new frames as they arrive** and charts them live; **run health** checked every minute (also for a capture running as a service or on another computer) |
+| | **Camera** | live preview for framing and focus, with **Zoom / Pan** buttons and **Fill frame** |
+| | **Capture** | scheduled photos with progress; the **same live preview** as the Camera page, for framing without leaving the page; optionally **measures new frames as they arrive** and charts them live; **run health** checked every minute (also for a capture running as a service or on another computer) |
 | Measure | **Set up measurement** | click the base, stem path, region or field plots; drag over colours |
 | | **SAM prompts** | click on the target (or the stem) and see SAM 2's mask; save prompts per frame |
 | | **Analyze** | run the analysis; per-frame results shown as the overlay, the aligned frame with its mask, or the photo as taken; **exclude a frame by hand with a reason** |

@@ -5,7 +5,16 @@ from __future__ import annotations
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QToolButton
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QGraphicsPixmapItem,
+    QGraphicsScene,
+    QGraphicsView,
+    QHBoxLayout,
+    QPushButton,
+    QToolButton,
+    QWidget,
+)
 
 from fungus_cv.gui import theme
 from fungus_cv.gui.qt_util import bgr_to_pixmap
@@ -14,6 +23,11 @@ from fungus_cv.gui.qt_util import bgr_to_pixmap
 class ImageView(QGraphicsView):
     """Shows one image. Wheel/trackpad scroll zooms, middle-drag or Alt(Option)+drag pans,
     double-click or the Fit button fits the whole image.
+
+    In ``PAN`` mode (``set_nav_mode``) a left-drag pans and the wheel moves the image up and
+    down instead of zooming -- and, when the whole image is on screen already, scrolls the
+    page behind it. ``ZOOM`` mode, the default, is the behaviour above; ``ViewControls``
+    gives the user a button for each.
 
     Emits ``clicked(x, y, button)`` and ``dragged(x0, y0, x1, y1)`` in full-resolution pixel
     coordinates (pixel centres are integers), so annotations are independent of zoom. With
@@ -24,12 +38,14 @@ class ImageView(QGraphicsView):
     """
 
     STROKE_PRESS, STROKE_MOVE, STROKE_RELEASE = 0, 1, 2
+    ZOOM, PAN = "zoom", "pan"
 
     clicked = Signal(float, float, int)
     dragged = Signal(float, float, float, float)
     hovered = Signal(float, float)
     stroke = Signal(float, float, int, int)
     handle_moved = Signal(int, float, float, int)
+    nav_mode_changed = Signal(str)
 
     HANDLE_GRAB_PX = 8  # how close (on screen) a press must be to grab a handle
 
@@ -51,6 +67,7 @@ class ImageView(QGraphicsView):
         self._overlays = []
         self._press = None
         self._pan = None
+        self._nav_mode = self.ZOOM
         self.drag_enabled = False
         self.paint_enabled = False
         self._painting: int | None = None  # mouse button of the stroke in progress
@@ -118,6 +135,38 @@ class ImageView(QGraphicsView):
         if self._has_image:
             self.fitInView(self._image_rect, Qt.KeepAspectRatio)
 
+    def fill(self) -> None:
+        """Zoom until the image covers the whole window; the long edge runs off-screen."""
+        if self._has_image:
+            self.fitInView(self._image_rect, Qt.KeepAspectRatioByExpanding)
+
+    # --- navigation mode ---------------------------------------------------------------
+
+    @property
+    def nav_mode(self) -> str:
+        return self._nav_mode
+
+    def set_nav_mode(self, mode: str) -> None:
+        if mode not in (self.ZOOM, self.PAN) or mode == self._nav_mode:
+            return
+        self._nav_mode = mode
+        self._rest_cursor()
+        self.nav_mode_changed.emit(mode)
+
+    def image_fits(self) -> bool:
+        """Whether the whole image is on screen, so panning has nowhere to go."""
+        if not self._has_image:
+            return True
+        shown, window = self.transform().mapRect(self._image_rect), self.viewport().rect()
+        return shown.width() <= window.width() + 1 and shown.height() <= window.height() + 1
+
+    def _rest_cursor(self) -> None:
+        """The cursor for this mode when nothing is being dragged."""
+        if self._nav_mode == self.PAN:
+            self.setCursor(Qt.OpenHandCursor)
+        else:
+            self.unsetCursor()
+
     def resizeEvent(self, event):  # noqa: N802 - Qt API
         super().resizeEvent(event)
         hint = self.fit_button.sizeHint()
@@ -183,15 +232,33 @@ class ImageView(QGraphicsView):
     # --- interaction -------------------------------------------------------------------
 
     def wheelEvent(self, event):  # noqa: N802 - Qt API
-        factor = 1.25 if event.angleDelta().y() > 0 else 0.8
+        delta = event.angleDelta()
+        if self._nav_mode == self.PAN:
+            if self.image_fits():
+                # Nothing to move inside the picture, so let the page behind scroll instead
+                # of swallowing the wheel.
+                event.ignore()
+                return
+            dx, dy = -delta.x(), -delta.y()  # a trackpad also scrolls sideways on its own
+            if event.modifiers() & Qt.ShiftModifier:
+                dx, dy = dy, 0  # Shift+wheel scrolls sideways
+            self._scroll_by(dx, dy)
+            return
+        factor = 1.25 if delta.y() > 0 else 0.8
         self.scale(factor, factor)
+
+    def _scroll_by(self, dx: float, dy: float) -> None:
+        h, v = self.horizontalScrollBar(), self.verticalScrollBar()
+        h.setValue(round(h.value() + dx))
+        v.setValue(round(v.value() + dy))
 
     def mouseDoubleClickEvent(self, event):  # noqa: N802
         self.fit()
 
     def mousePressEvent(self, event):  # noqa: N802
         if event.button() == Qt.MiddleButton or (
-                event.button() == Qt.LeftButton and event.modifiers() & Qt.AltModifier):
+                event.button() == Qt.LeftButton
+                and (event.modifiers() & Qt.AltModifier or self._nav_mode == self.PAN)):
             self._pan = event.position()
             self.setCursor(Qt.ClosedHandCursor)
             return
@@ -215,9 +282,7 @@ class ImageView(QGraphicsView):
         if self._pan is not None:
             delta = event.position() - self._pan
             self._pan = event.position()
-            h, v = self.horizontalScrollBar(), self.verticalScrollBar()
-            h.setValue(round(h.value() - delta.x()))
-            v.setValue(round(v.value() - delta.y()))
+            self._scroll_by(-delta.x(), -delta.y())
             return
         scene = self.mapToScene(event.position().toPoint())
         self.hovered.emit(scene.x(), scene.y())
@@ -231,7 +296,7 @@ class ImageView(QGraphicsView):
             if self._handle_at(event.position()) is not None:
                 self.setCursor(Qt.OpenHandCursor)
             else:
-                self.unsetCursor()
+                self._rest_cursor()
         if self._press is not None and self.drag_enabled:
             start = self._press[0]
             rect = QRectF(start, scene).normalized()
@@ -245,7 +310,7 @@ class ImageView(QGraphicsView):
     def mouseReleaseEvent(self, event):  # noqa: N802
         if self._pan is not None:
             self._pan = None
-            self.unsetCursor()
+            self._rest_cursor()
             return
         if self._painting is not None:
             scene = self.mapToScene(event.position().toPoint())
@@ -271,3 +336,42 @@ class ImageView(QGraphicsView):
             else:
                 self.clicked.emit(start.x(), start.y(), int(button.value))
         super().mouseReleaseEvent(event)
+
+
+class ViewControls(QWidget):
+    """A row of buttons for an :class:`ImageView`: Zoom/Pan mode, Fit and Fill.
+
+    The mouse alone is ambiguous on a live view — the wheel cannot both zoom and scroll — so
+    the mode is a button the user can see, and Fill sets the preview up at a glance.
+    """
+
+    def __init__(self, view: ImageView, parent=None):
+        super().__init__(parent)
+        self.view = view
+        self.zoom_btn = QPushButton("Zoom")
+        self.zoom_btn.setToolTip("Scroll wheel zooms in and out")
+        self.pan_btn = QPushButton("Pan")
+        self.pan_btn.setToolTip("Scroll wheel moves the picture up and down; drag to move it")
+        self.modes = QButtonGroup(self)
+        self.modes.setExclusive(True)
+        for button, mode in ((self.zoom_btn, ImageView.ZOOM), (self.pan_btn, ImageView.PAN)):
+            button.setCheckable(True)
+            self.modes.addButton(button)
+            button.clicked.connect(lambda _=False, m=mode: self.view.set_nav_mode(m))
+        self.fit_btn = QPushButton("Fit")
+        self.fit_btn.setToolTip("Show the whole picture (or double-click it)")
+        self.fit_btn.clicked.connect(self.view.fit)
+        self.fill_btn = QPushButton("Fill frame")
+        self.fill_btn.setToolTip("Zoom until the picture fills the window; its long edge is "
+                                 "cropped")
+        self.fill_btn.clicked.connect(self.view.fill)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        for widget in (self.zoom_btn, self.pan_btn, self.fit_btn, self.fill_btn):
+            row.addWidget(widget)
+        view.nav_mode_changed.connect(self._mode_changed)
+        self._mode_changed(view.nav_mode)
+
+    def _mode_changed(self, mode: str) -> None:
+        (self.pan_btn if mode == ImageView.PAN else self.zoom_btn).setChecked(True)

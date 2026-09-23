@@ -11,10 +11,11 @@ pytest.importorskip("PySide6")
 pytest.importorskip("pytestqt")
 
 from PySide6.QtCore import QPoint, QPointF, QSettings, Qt  # noqa: E402
+from PySide6.QtGui import QWheelEvent  # noqa: E402
 
 from fungus_cv.capture import permissions  # noqa: E402
 from fungus_cv.capture.permissions import NOT_APPLICABLE, CameraAccess  # noqa: E402
-from fungus_cv.gui.image_view import ImageView  # noqa: E402
+from fungus_cv.gui.image_view import ImageView, ViewControls  # noqa: E402
 from fungus_cv.gui.main_window import MainWindow  # noqa: E402
 from fungus_cv.gui.qt_util import bgr_to_qimage  # noqa: E402
 from fungus_cv.gui.state import AppState  # noqa: E402
@@ -35,7 +36,8 @@ def window(qtbot, tmp_path, monkeypatch):
     win = MainWindow(state)
     qtbot.addWidget(win)
     win.show()
-    return win
+    yield win
+    state.preview.stop()  # a live preview thread must not outlive the window
 
 
 @pytest.fixture
@@ -98,6 +100,64 @@ def test_image_view_pans_when_fitted_and_fit_button_restores(qtbot):
     view.fit_button.click()
     fitted = view.mapToScene(view.viewport().rect().center())
     assert abs(fitted.x() - centre.x()) < 3 and abs(fitted.y() - centre.y()) < 3
+
+
+def wheel(view, notches: int, modifiers=Qt.NoModifier) -> QWheelEvent:
+    """A wheel event over the middle of ``view`` (one notch is 120 units, up is positive)."""
+    pos = QPointF(view.viewport().rect().center())
+    return QWheelEvent(pos, view.mapToGlobal(pos.toPoint()), QPoint(), QPoint(0, 120 * notches),
+                       Qt.NoButton, modifiers, Qt.NoScrollPhase, False)
+
+
+def test_image_view_pan_mode_scrolls_instead_of_zooming(qtbot):
+    """In Pan mode the wheel moves the picture, and leaves the page to scroll when it fits."""
+    view = ImageView()
+    qtbot.addWidget(view)
+    view.resize(400, 300)
+    view.show()
+    view.set_image(np.zeros((300, 400, 3), np.uint8))
+    view.set_nav_mode(ImageView.PAN)
+    fitted = view.transform().m11()
+
+    whole_image_visible = wheel(view, -1)
+    view.wheelEvent(whole_image_visible)
+    assert not whole_image_visible.isAccepted()  # goes to the page behind
+    assert view.transform().m11() == fitted
+
+    view.scale(4, 4)
+    before = view.verticalScrollBar().value()
+    zoomed_in = wheel(view, -1)
+    view.wheelEvent(zoomed_in)
+    assert view.verticalScrollBar().value() > before  # the picture moved
+    assert view.transform().m11() == pytest.approx(4 * fitted)  # and did not zoom
+
+    view.set_nav_mode(ImageView.ZOOM)
+    view.wheelEvent(wheel(view, 1))
+    assert view.transform().m11() > 4 * fitted
+
+
+def test_view_controls_switch_mode_and_fill_the_window(qtbot):
+    view = ImageView()
+    qtbot.addWidget(view)
+    view.resize(400, 300)
+    view.show()
+    view.set_image(np.zeros((200, 400, 3), np.uint8))  # wider than the window
+    controls = ViewControls(view)
+    qtbot.addWidget(controls)
+    assert controls.zoom_btn.isChecked() and view.nav_mode == ImageView.ZOOM
+
+    controls.pan_btn.click()
+    assert view.nav_mode == ImageView.PAN
+    view.set_nav_mode(ImageView.ZOOM)  # changed elsewhere: the buttons follow
+    assert controls.zoom_btn.isChecked() and not controls.pan_btn.isChecked()
+
+    controls.fit_btn.click()
+    fitted = view.transform().m11()
+    controls.fill_btn.click()
+    assert view.transform().m11() == pytest.approx(1.5 * fitted, rel=0.05)  # 300/200
+    assert not view.image_fits()
+    controls.fit_btn.click()
+    assert view.image_fits()
 
 
 def test_image_view_drags_handles_instead_of_clicking(qtbot):
@@ -242,6 +302,68 @@ def test_camera_page_reports_no_cameras(window, qtbot):
     camera = page(window, "Camera")
     qtbot.waitUntil(lambda: "No cameras found" in camera.message.text(), timeout=30000)
     assert camera.device.count() == 0
+
+
+class FakeCamera:
+    """A camera that always hands back the same small frame, for the preview thread."""
+
+    def __init__(self, config):
+        self.config = config
+        self.warnings = []
+
+    def open(self):
+        pass
+
+    def read(self):
+        return np.full((48, 64, 3), 120, np.uint8)
+
+    def settings(self):
+        return {"exposure": -6.0, "white_balance": 4600.0, "focus": 30.0, "gain": None}
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def fake_camera(monkeypatch):
+    from fungus_cv.capture import camera as camera_module
+
+    monkeypatch.setattr(camera_module, "Camera", FakeCamera)
+
+
+def test_preview_started_on_the_capture_page_is_shown_on_the_camera_page(
+        window, qtbot, experiment, fake_camera):
+    """One preview stream serves both pages, whichever of them started it."""
+    window.open_experiment(experiment.root)
+    capture = page(window, "Capture")
+    capture.preview_btn.click()
+    qtbot.waitUntil(lambda: "64×48" in capture.preview_status.text(), timeout=10000)
+    assert capture.preview_btn.text() == "Stop preview"
+    assert capture.right_tabs.currentWidget() is capture.preview_tab
+
+    camera = page(window, "Camera")  # the same stream, without reopening the camera
+    qtbot.waitUntil(lambda: "64×48" in camera.stats.text(), timeout=10000)
+    assert camera.start_btn.text() == "Stop preview"
+
+    camera.start_btn.click()  # stopping on one page stops it for both
+    assert not window.state.preview.running
+    assert page(window, "Capture").preview_btn.text() == "Start preview"
+
+
+def test_a_capture_takes_the_camera_from_the_preview(window, qtbot, experiment, fake_camera):
+    window.open_experiment(experiment.root)
+    capture = page(window, "Capture")
+    capture.preview_btn.click()
+    qtbot.waitUntil(lambda: window.state.preview.last_frame is not None, timeout=10000)
+    camera = page(window, "Camera")  # a running preview is never interrupted to list cameras
+    assert window.state.preview.running
+
+    window.state.set_capturing(True)
+    assert not window.state.preview.running
+    assert not capture.preview_btn.isEnabled()
+    assert "paused while a capture is running" in camera.message.text()
+    window.state.set_capturing(False)
+    assert capture.preview_btn.isEnabled()
 
 
 def test_analyze_page_views_and_excludes_frames(window, qtbot, experiment):

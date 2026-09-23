@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -21,66 +19,18 @@ from PySide6.QtWidgets import (
 )
 
 from fungus_cv.gui import theme
-from fungus_cv.gui.image_view import ImageView
+from fungus_cv.gui.image_view import ImageView, ViewControls
+from fungus_cv.gui.preview import camera_config
 from fungus_cv.gui.qt_util import run_task
-from fungus_cv.quality import mean_brightness, sharpness
 
 log = logging.getLogger(__name__)
-
-
-class PreviewThread(QThread):
-    frame = Signal(object, dict)
-    failed = Signal(str)
-
-    def __init__(self, camera_config):
-        super().__init__()
-        self.camera_config = camera_config
-        self._running = True
-        # Set when a frame is sent, cleared once the window has drawn it: frames arriving
-        # in between are skipped so a slow display never builds up a backlog of images.
-        self.waiting_for_display = False
-
-    def stop(self) -> None:
-        self._running = False
-
-    def run(self) -> None:
-        from fungus_cv.capture.camera import Camera, CameraError
-
-        cam = Camera(self.camera_config)
-        try:
-            cam.open()
-        except CameraError as exc:
-            self.failed.emit(str(exc))
-            return
-        try:
-            last_settings, settings = 0.0, {}
-            while self._running:
-                try:
-                    image = cam.read()
-                except CameraError as exc:
-                    self.failed.emit(str(exc))
-                    return
-                if time.monotonic() - last_settings > 1.0:
-                    settings = cam.settings()
-                    last_settings = time.monotonic()
-                stats = {"brightness": mean_brightness(image), "sharpness": sharpness(image),
-                         **{k: settings.get(k) for k in ("exposure", "white_balance",
-                                                          "focus", "gain")},
-                         "warnings": list(cam.warnings)}
-                if not self.waiting_for_display:
-                    self.waiting_for_display = True
-                    self.frame.emit(image, stats)
-                self.msleep(30)
-        finally:
-            cam.close()
 
 
 class CameraPage(QWidget):
     def __init__(self, state):
         super().__init__()
         self.state = state
-        self.thread: PreviewThread | None = None
-        self.last_frame: np.ndarray | None = None
+        self.preview = state.preview  # shared with the Capture page
 
         self.device = QComboBox()
         self.device.setMinimumWidth(320)
@@ -98,6 +48,11 @@ class CameraPage(QWidget):
         self.message.setWordWrap(True)
         self.stats = QLabel("—")
         self.view = ImageView()
+        self.view.setMinimumHeight(320)
+        # Framing is mostly scrolling and fitting, so start in Pan: the wheel then moves the
+        # picture (or the page, when it all fits) instead of zooming under the pointer.
+        self.view.set_nav_mode(ImageView.PAN)
+        self.controls = ViewControls(self.view)
 
         top = QHBoxLayout()
         top.addWidget(QLabel("Camera:"))
@@ -105,25 +60,35 @@ class CameraPage(QWidget):
         top.addWidget(self.refresh_btn)
         top.addWidget(self.start_btn)
         top.addWidget(self.snapshot_btn)
-        top.addWidget(self.grid)
         top.addStretch()
+        view_row = QHBoxLayout()
+        view_row.addWidget(QLabel("View:"))
+        view_row.addWidget(self.controls)
+        view_row.addWidget(self.grid)
+        view_row.addStretch()
         layout = QVBoxLayout(self)
         layout.addLayout(top)
         layout.addWidget(self.use_experiment)
         layout.addWidget(self.message)
+        layout.addLayout(view_row)
         layout.addWidget(self.view, 1)
         layout.addWidget(self.stats)
         self._found_once = False
         state.busy_changed.connect(self._busy)
+        self.preview.frame.connect(self._show_frame)
+        self.preview.failed.connect(self._preview_failed)
+        self.preview.running_changed.connect(self._running_changed)
 
     def on_shown(self) -> None:
-        if not self._found_once:
+        # Probing the cameras needs them free, so never interrupt a running preview for it.
+        if not self._found_once and not self.preview.running:
             self._found_once = True
             self.find_cameras()
+        if self.preview.last_frame is not None:  # started on another page
+            self._show_frame(self.preview.last_frame, self.preview.last_stats)
 
     def _busy(self, capturing: bool) -> None:
-        if capturing:
-            self.stop_preview()
+        if capturing:  # the capture stopped the preview: they would share one camera
             self._say("Preview is paused while a capture is running (they would share the "
                       "camera).", warn=False)
         self.start_btn.setEnabled(not capturing)
@@ -184,55 +149,34 @@ class CameraPage(QWidget):
     # --- preview -----------------------------------------------------------------------
 
     def _camera_config(self):
-        from fungus_cv.config import CameraConfig
-
-        index = self.device.currentData()
-        exp = self.state.experiment
-        if self.use_experiment.isChecked() and exp is not None:
-            cfg = exp.config.cameras[0].model_copy()
-            if index is not None:
-                cfg.index = int(index)
-            return cfg
-        return CameraConfig(index=int(index or 0), exposure="auto", white_balance="auto",
-                            focus="auto", warmup_frames=3, settle_seconds=0)
+        return camera_config(self.state, index=self.device.currentData(),
+                             use_experiment=self.use_experiment.isChecked())
 
     def toggle_preview(self) -> None:
-        if self.thread is not None:
+        if self.preview.running:
             self.stop_preview()
             return
         if self.device.count() == 0:
             self.find_cameras()
             return
-        self.thread = PreviewThread(self._camera_config())
-        self.thread.frame.connect(self._show_frame)
-        self.thread.failed.connect(self._preview_failed)
-        self.thread.finished.connect(self._preview_finished)
-        self.thread.start()
-        self.start_btn.setText("Stop preview")
+        self.preview.start(self._camera_config())
         self._say("Opening camera…", warn=False)
 
     def stop_preview(self) -> None:
-        if self.thread is not None:
-            self.thread.stop()
-            self.thread.wait(3000)
-            self.thread = None
-        self.start_btn.setText("Start preview")
+        self.preview.stop()
 
-    def _preview_finished(self) -> None:
-        if self.thread is not None and not self.thread.isRunning():
-            self.thread = None
-            self.start_btn.setText("Start preview")
+    def _running_changed(self, running: bool) -> None:
+        self.start_btn.setText("Stop preview" if running else "Start preview")
 
     def _preview_failed(self, message: str) -> None:
         self._say(f"{message}. Is another app using the camera? Try another camera, or see "
                   "Diagnostics.")
 
     def _show_frame(self, image: np.ndarray, stats: dict) -> None:
-        if self.thread is not None:
-            self.thread.waiting_for_display = False
+        if not self.isVisible():
+            return  # another page is showing the preview; on_shown catches this one up
         if self.message.text().startswith(f"<span style='color:{theme.TEXT}'>Opening"):
             self._say("")
-        self.last_frame = image
         shown = image
         if self.grid.isChecked():
             shown = image.copy()
@@ -250,13 +194,13 @@ class CameraPage(QWidget):
         self.stats.setText(text)
 
     def save_snapshot(self) -> None:
-        if self.last_frame is None:
+        if self.preview.last_frame is None:
             return
         exp = self.state.experiment
         folder = exp.root if exp is not None else Path.home()
         path = folder / f"snapshot_{datetime.now():%Y%m%d_%H%M%S}.png"
-        cv2.imwrite(str(path), self.last_frame)
+        cv2.imwrite(str(path), self.preview.last_frame)
         self._say(f"Saved {path}", warn=False)
 
     def shutdown(self) -> None:
-        self.stop_preview()
+        self.stop_preview()  # the window stops it too, in case this page was never built

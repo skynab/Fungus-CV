@@ -1,4 +1,4 @@
-"""Little drawings of what to click for each tool on the Set up measurement page.
+"""Little drawings of what to click for each tool on the Set Up Measurement page.
 
 The page asks for clicks whose meaning is hard to guess from a word ("Base", "Region"), so
 each tool shows a sketch of the same clicks on a made-up scene, in the colours the real

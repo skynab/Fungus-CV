@@ -26,7 +26,7 @@ What it does, if you need to do it by hand:
   `.venv\Scripts\python.exe -m pip install -e ".[dev,gui]" pytest-qt` (pytest-qt is not in the
   `dev` extra; without it the GUI tests are skipped silently). `tzdata` comes with it on
   Windows, for time zones.
-- **The SAM prompts page, and Analyze/Train with `method: sam2` or `method: model`, need
+- **The SAM Prompts page, and Analyze/Train with `method: sam2` or `method: model`, need
   `[sam]` as well** — without it they report the missing dependency and everything else
   still works. Add it with the GPU note below (plain `[sam]` gets the CPU-only build).
 - **Models on an NVIDIA GPU:** install the CUDA build of PyTorch **first**, using the command
@@ -108,7 +108,7 @@ and the real-image validation suite. CI runs the same tests on Windows (`.github
 ```
 
 `--with-models` bundles only what it can import, so it stops with an error unless `[sam]`
-is installed here. An exe built without it reports a missing dependency on the SAM prompts
+is installed here. An exe built without it reports a missing dependency on the SAM Prompts
 page and for `method: sam2` / `method: model`; rebuild with `--with-models` to add them.
 
 Build on Windows (PyInstaller does not cross-compile) and ship the whole `dist\Fungus-CV`

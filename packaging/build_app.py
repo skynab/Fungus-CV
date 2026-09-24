@@ -81,7 +81,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.with_models:
         # PyInstaller bundles what it can import: without these the build quietly produces an
-        # app whose SAM prompts and model-based analysis fail at runtime.
+        # app whose SAM Prompts and model-based analysis fail at runtime.
         missing = [p for p in ("torch", "torchvision", "transformers")
                    if importlib.util.find_spec(p) is None]
         if missing:

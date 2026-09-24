@@ -4,6 +4,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from pathlib import Path  # noqa: E402
+
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
@@ -185,11 +187,11 @@ def test_image_view_drags_handles_instead_of_clicking(qtbot):
 
 
 def test_every_setup_tool_shows_what_to_click(window, qtbot):
-    """Each tool on Set up measurement has its own sketch of the clicks it wants."""
+    """Each tool on Set Up Measurement has its own sketch of the clicks it wants."""
     from fungus_cv.gui.pages.setup import TOOLS
     from fungus_cv.gui.tool_diagrams import diagram
 
-    setup = page(window, "Set up measurement")
+    setup = page(window, "Set Up Measurement")
     seen = []
     for key, _, _ in TOOLS:
         assert diagram(key) is not None, key
@@ -246,7 +248,7 @@ def test_full_workflow_setup_analyze_report(window, dye_experiment, qtbot):
     dye_experiment.config_path.write_text(text)
     window.state.reload()
 
-    setup = page(window, "Set up measurement")
+    setup = page(window, "Set Up Measurement")
     qtbot.waitUntil(lambda: setup.analyzer is not None, timeout=20000)
 
     # Click base, tip, then the region corners, as a user would.
@@ -304,7 +306,7 @@ def test_full_workflow_setup_analyze_report(window, dye_experiment, qtbot):
 
 def test_setup_field_plots(window, dye_experiment, qtbot):
     window.open_experiment(dye_experiment.root)
-    setup = page(window, "Set up measurement")
+    setup = page(window, "Set Up Measurement")
     qtbot.waitUntil(lambda: setup.analyzer is not None, timeout=20000)
     for button in setup.tool_group.buttons():
         if button.property("tool") == "plot":
@@ -322,7 +324,7 @@ def test_setup_field_plots(window, dye_experiment, qtbot):
 
 def test_setup_refuses_incomplete_annotations(window, dye_experiment, qtbot):
     window.open_experiment(dye_experiment.root)
-    setup = page(window, "Set up measurement")
+    setup = page(window, "Set Up Measurement")
     qtbot.waitUntil(lambda: setup.analyzer is not None, timeout=20000)
     with pytest.raises(ValueError, match="base"):
         setup.build_annotations()
@@ -442,10 +444,10 @@ def test_sidebar_sections_skip_headers(window):
     rows = [window.nav.item(r) for r in range(window.nav.count())]
     headers = [i.text() for i in rows if not i.flags() & Qt.ItemIsSelectable]
     assert headers[:2] == ["CAPTURE", "MEASURE"]
-    window.go_to("SAM prompts")
-    assert window.stack.currentWidget() is dict(window.pages)["SAM prompts"]
+    window.go_to("SAM Prompts")
+    assert window.stack.currentWidget() is dict(window.pages)["SAM Prompts"]
     window.nav.setCurrentRow(0)  # clicking a header changes nothing
-    assert window.stack.currentWidget() is dict(window.pages)["SAM prompts"]
+    assert window.stack.currentWidget() is dict(window.pages)["SAM Prompts"]
 
 
 def fake_sam(monkeypatch, calls):
@@ -470,7 +472,7 @@ def test_prompt_page_clicks_preview_and_save(window, qtbot, experiment, monkeypa
     fake_sam(monkeypatch, calls)
     build_experiment(experiment, minutes=range(0, 4), bump_at=-1)
     window.open_experiment(experiment.root)
-    prompts_page = page(window, "SAM prompts")
+    prompts_page = page(window, "SAM Prompts")
     qtbot.waitUntil(lambda: prompts_page.frame is not None, timeout=20000)
     assert prompts_page.index == 3  # starts on the last frame
 
@@ -624,9 +626,9 @@ def test_train_page_trains_evaluates_uses_and_cancels(window, qtbot, experiment,
     ds.save()
     window.open_experiment(experiment.root)
 
-    train_page = page(window, "Train models")
+    train_page = page(window, "Train Models")
     train_page.dataset.setText(str(ds.root))
-    assert train_page.output.text().endswith("models/dye-v1")
+    assert Path(train_page.output.text()).parts[-2:] == ("models", "dye-v1")
     train_page.encoder.setCurrentText("resnet18")
     train_page.steps.setValue(20)
     train_page.batch.setValue(2)
@@ -651,7 +653,7 @@ def test_train_page_trains_evaluates_uses_and_cancels(window, qtbot, experiment,
     assert target.method == "model" and target.model.path.endswith("dye-v1")
 
     train_page.dataset.setText(str(ds.root))  # suggests dye-v2 now
-    assert train_page.output.text().endswith("models/dye-v2")
+    assert Path(train_page.output.text()).parts[-2:] == ("models", "dye-v2")
     train_page.steps.setValue(100000)
     train_page.start()
     qtbot.waitUntil(lambda: len(train_page.history) >= 1 or train_page.task is None,
@@ -834,7 +836,7 @@ def test_camera_selector_switches_annotations_and_results(window, qtbot, experim
     second = float(analyze_page.rows[-1]["extent_mm"])
     assert second < first * 0.9  # cam1 sees the towel foreshortened
 
-    setup = page(window, "Set up measurement")
+    setup = page(window, "Set Up Measurement")
     qtbot.waitUntil(lambda: setup.analyzer is not None, timeout=20000)
     assert setup.analyzer.camera == "cam1"
     setup.save_annotations()

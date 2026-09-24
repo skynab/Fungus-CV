@@ -108,7 +108,7 @@ class CapturePage(QWidget):
         self.log.setMaximumBlockCount(2000)
         self.last_image = ImageView()
         self.watch = QCheckBox("Measure new frames as they arrive")
-        self.watch.setToolTip("Needs the measurement set up (Set up measurement page).")
+        self.watch.setToolTip("Needs the measurement set up (Set Up Measurement page).")
         self.watch_metric = QComboBox()
         self.watch_metric.setEditable(True)
         self.watch_metric.addItems(["(automatic)"] + METRICS)

@@ -190,7 +190,7 @@ class ExperimentPage(QWidget):
             lines.append(f"First: {ok[0]['timestamp_utc']} &nbsp; Last: {ok[-1]['timestamp_utc']}")
         ann = exp.root / "annotations.json"
         lines.append("Measurement set up: " + ("yes" if ann.exists() else
-                                               "not yet (use <i>Set up measurement</i>)"))
+                                               "not yet (use <i>Set Up Measurement</i>)"))
         results = exp.root / "results" / "measurements.csv"
         lines.append("Analysis results: " + ("yes" if results.exists() else "none yet"))
         self.summary.setText("<br>".join(lines))

@@ -51,15 +51,15 @@ PAGE_INFO = {
     "Camera": "Live preview for framing and focus, and a check of the camera settings.",
     "Capture": "Scheduled photos, measured as they arrive. Each image is written as soon as "
                "it is taken, so stopping never loses a frame.",
-    "Set up measurement": "Click the base and tip, outline the region, then drag boxes over "
+    "Set Up Measurement": "Click the base and tip, outline the region, then drag boxes over "
                           "the colour you are following.",
-    "SAM prompts": "Click the target, right-click what looks similar but isn't. SAM 2 tracks "
+    "SAM Prompts": "Click the target, right-click what looks similar but isn't. SAM 2 tracks "
                    "the mask forward and backward through the whole time-lapse.",
     "Analyze": "Measure every frame, browse the per-frame results and exclude frames by hand.",
     "Report": "Fit growth models and read the report charts, spread map and sensitivity check.",
     "Labels": "Label images for training: add frames, correct the masks with a brush or SAM "
               "clicks, and mark them reviewed.",
-    "Train models": "Train a segmentation model on a labeled dataset, watch it learn, and "
+    "Train Models": "Train a segmentation model on a labeled dataset, watch it learn, and "
                     "evaluate it.",
     "Study": "Compare conditions across replicate experiments.",
     "Validation": "Agreement with hand measurements, and the validation suite.",
@@ -186,14 +186,14 @@ class MainWindow(QMainWindow):
                 ("Capture", CapturePage(self.state, log_handler)),
             ]),
             ("Measure", [
-                ("Set up measurement", SetupPage(self.state)),
-                ("SAM prompts", PromptPage(self.state)),
+                ("Set Up Measurement", SetupPage(self.state)),
+                ("SAM Prompts", PromptPage(self.state)),
                 ("Analyze", AnalyzePage(self.state)),
                 ("Report", ReportPage(self.state)),
             ]),
             ("Models", [
                 ("Labels", LabelsPage(self.state)),
-                ("Train models", TrainPage(self.state)),
+                ("Train Models", TrainPage(self.state)),
             ]),
             ("Results", [
                 ("Study", StudyPage(self.state)),

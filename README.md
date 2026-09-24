@@ -27,24 +27,24 @@ Fungus-CV has a desktop app with a page for each step, grouped in the sidebar:
 | Capture | **Experiment** | open or create an experiment, key settings |
 | | **Camera** | live preview for framing and focus, with **Zoom / Pan** buttons and **Fill frame** |
 | | **Capture** | scheduled photos with progress; the **same live preview** as the Camera page, for framing without leaving the page; optionally **measures new frames as they arrive** and charts them live; **run health** checked every minute (also for a capture running as a service or on another computer) |
-| Measure | **Set up measurement** | click the base, stem path, region or field plots; drag over colours |
-| | **SAM prompts** | click on the target (or the stem) and see SAM 2's mask; save prompts per frame |
+| Measure | **Set Up Measurement** | click the base, stem path, region or field plots; drag over colours |
+| | **SAM Prompts** | click on the target (or the stem) and see SAM 2's mask; save prompts per frame |
 | | **Analyze** | run the analysis; per-frame results shown as the overlay, the aligned frame with its mask, or the photo as taken; **exclude a frame by hand with a reason** |
 | | **Report** | fits with standard errors, bootstrap intervals, AICc weights and warnings; charts; **spread map**, **sensitivity check** and a **shareable page** |
 | Models | **Labels** | open or create a dataset; add frames evenly or where a model is least sure; brush and SAM clicks; mark reviewed; rank with a model |
-| | **Train models** | train with a live loss / validation IoU chart, read the model card, use the model for the experiment, evaluate on other labeled data |
+| | **Train Models** | train with a live loss / validation IoU chart, read the model card, use the model for the experiment, evaluate on other labeled data |
 | Results | **Study** | edit a study (replicates and conditions), run it, read condition summaries, comparisons, figures and the methods draft |
 | | **Validation** | Bland–Altman agreement with hand measurements; run the validation suite and save its baseline |
 | This computer | **Diagnostics** | camera permission, cameras, GPU, disk |
 
 ```bash
 pip install -e ".[gui]"
-pip install -e ".[sam]"          # only for SAM prompts and trained models; see Install
+pip install -e ".[sam]"          # only for SAM Prompts and trained models; see Install
 fungus gui                       # or: fungus gui experiments/dye-test-1
 ```
 
-Colour-threshold measurement needs nothing beyond `[gui]`. The **SAM prompts** page, and
-**Analyze** or **Train models** with `method: sam2` or `method: model`, need PyTorch and
+Colour-threshold measurement needs nothing beyond `[gui]`. The **SAM Prompts** page, and
+**Analyze** or **Train Models** with `method: sam2` or `method: model`, need PyTorch and
 transformers; without them those pages say what to install and nothing else is affected.
 
 To build a standalone app (`Fungus-CV.app` on macOS, `Fungus-CV.exe` on Windows), see [packaging/README.md](packaging/README.md). **On macOS, the packaged app is the most reliable way to use the camera.** It has its own entry under Privacy & Security → Camera, and macOS asks for permission the first time. When `fungus` runs from a terminal, the permission belongs to that terminal app instead.
@@ -63,7 +63,7 @@ pip install -e ".[sam]"   # SAM 2 and trained models (PyTorch + transformers, a 
 (With [uv](https://docs.astral.sh/uv/): `uv venv && uv pip install -e ".[dev]"`.)
 
 The extras are separate because PyTorch is a large download that colour-threshold
-measurement does not need. Install `[sam]` if you will use the **SAM prompts** page,
+measurement does not need. Install `[sam]` if you will use the **SAM Prompts** page,
 `method: sam2` or `method: model`; **with an NVIDIA GPU, install the CUDA build of PyTorch
 first** (the command from <https://pytorch.org/get-started/locally/>), because `[sam]` on
 its own installs the CPU-only build. `fungus doctor` and the app's Diagnostics page report

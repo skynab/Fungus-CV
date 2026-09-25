@@ -165,6 +165,9 @@ class PromptPage(QWidget):
         n = len(self.analyzer.frames)
         self.slider.setRange(0, n - 1)
         self.slider.setEnabled(n > 1)
+        # Before anything reads them: _load_prompts() shows the current frame again, and an
+        # index kept from a longer experiment would be past the end of this one.
+        self.index, self.frame = last, frame
         self._load_prompts()
         self._set_frame(last, frame)
         self.message.setText("Click on the target. The magenta mask is SAM's answer.")

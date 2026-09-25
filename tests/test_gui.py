@@ -465,6 +465,27 @@ def fake_sam(monkeypatch, calls):
     monkeypatch.setattr(prompt_page, "preload_model_modules", lambda methods: None)
 
 
+def test_prompt_page_survives_switching_to_a_shorter_experiment(
+        window, qtbot, experiment, tmp_path, monkeypatch):
+    """The frame the page is on must not outlive the experiment it belongs to."""
+    fake_sam(monkeypatch, [])
+    build_experiment(experiment, minutes=range(0, 6), bump_at=-1)
+    short = Experiment.create(tmp_path / "short", name="short")
+    build_experiment(short, minutes=range(0, 2), bump_at=-1)
+
+    window.open_experiment(experiment.root)
+    prompts_page = page(window, "SAM Prompts")
+    qtbot.waitUntil(lambda: prompts_page.frame is not None, timeout=20000)
+    assert prompts_page.index == 5  # the last frame of the long experiment
+
+    window.open_experiment(short.root)
+    qtbot.waitUntil(lambda: prompts_page.analyzer is not None
+                    and len(prompts_page.analyzer.frames) == 2, timeout=20000)
+    assert prompts_page.index == 1  # not 5, which this experiment does not have
+    assert prompts_page.frame_file.endswith(".png")
+    prompts_page._clicked(300.0, 300.0, Qt.LeftButton.value)  # used to raise IndexError
+
+
 def test_prompt_page_clicks_preview_and_save(window, qtbot, experiment, monkeypatch):
     from fungus_cv.segment.prompts import Prompts
 

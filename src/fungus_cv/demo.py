@@ -1,9 +1,10 @@
 """Demo experiments: realistic synthetic time-lapses to try every feature without a camera.
 
 A paper towel strip dipped in blue dye, photographed from the front, with two ArUco markers
-for scale. The dye rises by capillary wicking, h = k·√(t − t_lag), with a wet front that
-fades over a few millimetres, slightly uneven across the strip, a little camera shake, a slow
-drift in the room light and sensor noise. Because the true height of every frame is known,
+for scale and a neutral grey card for the lighting correction. The dye rises by capillary
+wicking, h = k·√(t − t_lag), with a wet front that fades over a few millimetres, slightly
+uneven across the strip, a little camera shake, a slow drift in the room light and sensor
+noise. Because the true height of every frame is known,
 the demo also writes hand measurements (the truth plus a ruler's reading error) and a
 validation suite, so `validate`, `validate-suite`, `sensitivity`, `study` and `power` all have
 something real to work on.
@@ -35,6 +36,10 @@ MARKER_MM = MARKER_PX * MM_PER_PX
 BLUE = np.array((190, 90, 30), np.float32)  # BGR
 TOWEL = np.array((238, 238, 236), np.float32)
 BACKGROUND = np.array((200, 205, 210), np.float32)
+# A neutral grey card propped in shot, as a careful experimenter would: it is what the
+# `patch` lighting correction and the Neutral patch tool measure the room light with.
+CARD = np.array((160, 160, 160), np.float32)
+CARD_BOX = (170, 560, 430, 790)  # x0, y0, x1, y1
 START = datetime(2026, 9, 20, 14, 0, tzinfo=timezone.utc)
 
 
@@ -79,6 +84,9 @@ def render(height_mm: float, rng: np.random.Generator, light: float = 1.0,
     strip = img[band, x0:x1]
     w = wet[band][..., None]
     img[band, x0:x1] = strip * (1 - w) + BLUE * w + (strip - TOWEL) * 0.3
+    cx0, cy0, cx1, cy1 = CARD_BOX
+    img[cy0:cy1, cx0:cx1] = CARD
+    cv2.rectangle(img, (cx0, cy0), (cx1 - 1, cy1 - 1), (120.0, 120.0, 120.0), 2)
     for marker_id, (mx, my) in {0: (120, 120), 1: (980, 680)}.items():
         q = 30
         img[my - q:my + MARKER_PX + q, mx - q:mx + MARKER_PX + q] = 255

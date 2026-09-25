@@ -48,7 +48,7 @@ class CameraPage(QWidget):
         self.message.setWordWrap(True)
         self.stats = QLabel("—")
         self.view = ImageView()
-        self.view.setMinimumHeight(320)
+        self.view.setFixedHeight(190)
         # Framing is mostly scrolling and fitting, so start in Pan: the wheel then moves the
         # picture (or the page, when it all fits) instead of zooming under the pointer.
         self.view.set_nav_mode(ImageView.PAN)
@@ -71,8 +71,9 @@ class CameraPage(QWidget):
         layout.addWidget(self.use_experiment)
         layout.addWidget(self.message)
         layout.addLayout(view_row)
-        layout.addWidget(self.view, 1)
+        layout.addWidget(self.view)
         layout.addWidget(self.stats)
+        layout.addStretch(1)
         self._found_once = False
         state.busy_changed.connect(self._busy)
         self.preview.frame.connect(self._show_frame)

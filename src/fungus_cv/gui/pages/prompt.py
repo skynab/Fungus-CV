@@ -236,7 +236,10 @@ class PromptPage(QWidget):
         self.remove_btn.setEnabled(existing is not None)
         self.message.setText("Loaded this frame's saved prompt." if existing else "")
         self.mask = None
-        self._changed()
+        # Don't re-run SAM 2 just for showing a frame: loading the model (and, the first
+        # time, downloading it) can take a while, and that shouldn't happen just from
+        # navigating here. It reruns from an actual edit (click, drag, undo, model change).
+        self._changed(preview=False)
 
     @property
     def frame_file(self) -> str:
@@ -278,12 +281,12 @@ class PromptPage(QWidget):
         except ValueError:
             return None
 
-    def _changed(self) -> None:
+    def _changed(self, preview: bool = True) -> None:
         if self.frame is None:
             return
         self._redraw()
         self.save_btn.setEnabled(self.current_prompt() is not None)
-        if self.current_prompt() is None:
+        if not preview or self.current_prompt() is None:
             self.mask = None
             self.view.set_mask(None)
             return

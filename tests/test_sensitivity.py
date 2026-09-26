@@ -29,9 +29,15 @@ def by_name(result):
 def test_default_variants_follow_the_settings(experiment):
     exp = prepared(experiment, soft=False)
     names = [v.name for v in sens.default_variants(exp)]
-    assert {"colour_wider", "colour_narrower", "no_cleanup", "align_ecc", "rectify_on",
+    assert {"colour_wider", "colour_narrower", "no_cleanup", "align_ecc",
             "front_percentile_25", "front_percentile_75"} <= set(names)
     assert "lighting_background" in names  # not corrected yet: try correcting
+    # Rectifying would move the frame out from under the annotations clicked on it.
+    assert "rectify_on" not in names
+    annotations = exp.root / "annotations.json"
+    annotations.rename(exp.root / "annotations.bak")
+    assert "rectify_on" in [v.name for v in sens.default_variants(Experiment(exp.root))]
+    (exp.root / "annotations.bak").rename(annotations)
 
     text = exp.config_path.read_text().replace("method: none", "method: background", 1)
     exp.config_path.write_text(text)

@@ -11,12 +11,20 @@ Works on Windows, macOS and Linux (Python 3.10+).
 ```bash
 fungus demo experiments/demo            # a synthetic dye time-lapse, annotated and scaled
 fungus analyze experiments/demo
-fungus report experiments/demo --model sqrt --model sqrt_lag --model power
+fungus report experiments/demo --model sqrt --model sqrt_lag --model power --covariate temperature_c
 fungus validate-suite experiments/demo/suite.yaml
 fungus demo experiments/demo-study --study   # replicates in two conditions + study.yaml
+fungus demo experiments/sam-demo --sam  # a mould colony for the SAM Prompts workflow
 ```
 
-The demo is a paper towel strip wicking blue dye, h = 12 mm·√(t − 0.5 min). It is built to be realistic: the wet front fades over a few millimetres and is uneven across the strip, there is camera shake, a slow change in room light, and sensor noise. The true height of every photo is in `demo_truth.csv`, and it comes with hand measurements and a validation suite, so every command has something to work on. In the app: File → Make Demo Experiment…
+There are two demos, one for each way of telling the program what to measure:
+
+- **Dye strip** (File → Make Demo Experiment…): the **Set Up Measurement** workflow, measured with colour thresholds. A paper towel strip wicking blue dye, h = 12 mm·√(t − 0.5 min). It is built to be realistic: the wet front fades over a few millimetres and is uneven across the strip, there is camera shake, a slow change in room light, and sensor noise. It is ready to Analyze.
+- **Mould colony** (File → Make SAM 2 Demo Experiment…): the **SAM Prompts** workflow. A colony spreading over an agar plate, photographed every 6 h for six days: a fuzzy off-white rim around an older grey-green centre, growing 0.22 mm/h after a 12 h lag and 1.4× faster to the right than to the left. There is no dye colour to threshold on, so it is set to SAM 2 (install `[sam]`) and left for you to prompt: the app opens it on SAM Prompts; on a frame where the colony is clearly visible, click both its white rim and its green centre (a single click on the centre gets only the centre, 9 mm short of the edge), save the prompt, then Analyze. Report it with the `equivalent_radius_mm` or `target_area_mm2` measurement, and its **Spread map** shows the lopsided growth.
+
+Both have their truth in `demo_truth.csv`, hand measurements and a validation suite, and a room temperature and humidity log (`room_logger.csv`, already imported), so every command has something to work on.
+
+On the Report page, **Measurement** and **Quality checks** are drawn by **Make report**; **Spread** and **Sensitivity** by their own buttons; **Conditions** by choosing a logged condition (**Import log…** adds one) before Make report. None of them depend on how the target was segmented.
 
 ## Desktop app
 

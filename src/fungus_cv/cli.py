@@ -141,13 +141,33 @@ def demo(
     study: bool = typer.Option(False, help="Instead: replicate experiments in two conditions "
                                "and a study file."),
     replicates: int = typer.Option(3, help="Replicates per condition with --study."),
+    sam: bool = typer.Option(False, help="Instead: a mould colony on an agar plate, set up "
+                             "for SAM 2 (you add the prompts)."),
 ) -> None:
-    """Make a realistic synthetic dye experiment to try everything without a camera."""
+    """Make a realistic synthetic experiment to try everything without a camera."""
     from fungus_cv import demo as demo_mod
 
     if folder.exists() and any(folder.iterdir()):
         typer.secho(f"{folder} already exists and is not empty", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
+    if sam:
+        colony = demo_mod.colony_experiment(folder, frames=min(frames, 25))
+        typer.echo(f"Made {folder}: {len(colony.files)} photos, every 6 h, of a mould colony "
+                   f"spreading over an agar plate (truth: radius grows "
+                   f"{colony.speed_mm_per_h} mm/h after {colony.lag_h:g} h, "
+                   f"{colony.anisotropy:g}x faster to the right than to the left).")
+        typer.echo("It is scaled and annotated and set to SAM 2 (pip install -e \".[sam]\"), "
+                   "but has no prompts yet. Try:")
+        for line in (f"fungus prompt {folder}   # click the white rim and the green centre "
+                     "(or use SAM Prompts in the app)",
+                     f"fungus analyze {folder}",
+                     f"fungus report {folder} --metric equivalent_radius_mm --model linear",
+                     f"fungus spread {folder}",
+                     f"fungus validate-suite {folder / 'suite.yaml'}",
+                     f"fungus gui {folder}"):
+            typer.echo(f"  {line}")
+        typer.echo("demo_truth.csv holds the true equivalent radius of every frame.")
+        return
     if study:
         path, runs = demo_mod.dye_study(folder, replicates=replicates, frames=min(frames, 20))
         typer.echo(f"Made {len(runs)} demo experiments in {folder} and {path.name}.")

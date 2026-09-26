@@ -875,6 +875,37 @@ def test_file_menu_makes_and_opens_a_demo(window, qtbot, tmp_path):
     qtbot.waitUntil(lambda: window.state.experiment is not None, timeout=60000)
     assert window.state.experiment.root == tmp_path / "demo"
     assert len(window.state.experiment.read_frames()) == 30
+    report = page(window, "Report")
+    assert report.covariate.findText("temperature_c") > 0  # the demo logs the room
+
+
+def test_file_menu_makes_the_sam_demo_and_opens_sam_prompts(window, qtbot, tmp_path,
+                                                            monkeypatch):
+    from fungus_cv import demo as demo_mod
+
+    small = demo_mod.colony_experiment
+    monkeypatch.setattr(demo_mod, "colony_experiment", lambda root: small(root, frames=3))
+    window.make_demo(tmp_path / "sam-demo", sam=True)
+    qtbot.waitUntil(lambda: window.state.experiment is not None, timeout=60000)
+    assert window.state.experiment.config.analysis.target.method == "sam2"
+    assert window.stack.currentWidget() is dict(window.pages)["SAM Prompts"]
+
+
+def test_report_page_imports_a_conditions_log(window, qtbot, experiment, tmp_path):
+    build_experiment(experiment, minutes=range(0, 3), bump_at=-1)
+    window.open_experiment(experiment.root)
+    report = page(window, "Report")
+    report.refresh()
+    assert report.import_btn.isEnabled()
+    log = tmp_path / "logger.csv"
+    log.write_text("Time,Temperature (°C)\n2026-01-01T10:00:00+00:00,20.5\n"
+                   "2026-01-01T10:10:00+00:00,21.0\n", encoding="utf-8")
+    report.import_log(log)
+    assert report.covariate.currentText() == "temperature_c"
+    assert "Imported 2 rows" in report.message.text()
+    assert "Make report" in report.covariate_view.hint.text()
+    report.import_log(tmp_path / "missing.csv")
+    assert "Could not import" in report.message.text()
 
 
 def test_labels_page_edits_one_class_at_a_time(window, qtbot, tmp_path):
@@ -935,11 +966,15 @@ def test_report_page_spread_sensitivity_and_summary(window, qtbot, experiment, m
     report = page(window, "Report")
     report.refresh()
     assert report.spread_btn.isEnabled()
+    # Before their buttons are pressed, the tabs say what fills them.
+    assert not report.spread_view.has_image and "Spread map" in report.spread_view.hint.text()
+    assert "Sensitivity check" in report.sensitivity_view.hint.text()
+    assert "No conditions are logged" in report.covariate_view.hint.text()
 
     report.make_spread()
     qtbot.waitUntil(lambda: report.spread_btn.isEnabled() and "Spread" in
                     report.message.text(), timeout=60000)
-    assert report.spread_view._has_image
+    assert report.spread_view.has_image and report.spread_view.view._has_image
 
     # One quick variant keeps the test short; the page runs the default list.
     one = [sensitivity.Variant("open_px_0", "no speck removal",
@@ -949,7 +984,7 @@ def test_report_page_spread_sensitivity_and_summary(window, qtbot, experiment, m
     qtbot.waitUntil(lambda: report.sensitivity_btn.isEnabled() and "Sensitivity of" in
                     report.message.text(), timeout=120000)
     assert "no speck removal" in report.message.text()
-    assert report.sensitivity_view._has_image
+    assert report.sensitivity_view.has_image
 
     report.make_summary()
     qtbot.waitUntil(lambda: bool(opened), timeout=120000)
@@ -984,4 +1019,4 @@ def test_report_page_hours_and_daily(window, qtbot, tmp_path):
     report.make()
     qtbot.waitUntil(lambda: report.result is not None, timeout=60000)
     assert "temperature_c: mean" in report.message.text()
-    assert report.covariate_view._has_image
+    assert report.covariate_view.has_image

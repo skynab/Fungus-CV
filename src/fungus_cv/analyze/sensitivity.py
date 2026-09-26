@@ -127,7 +127,9 @@ def default_variants(experiment: Experiment) -> list[Variant]:
     elif (experiment.root / "annotations.json").exists():
         variants.append(Variant("lighting_background", "lighting corrected from the background",
                                 {"lighting.method": "background"}))
-    if analysis.markers.size_mm:
+    # Switching perspective correction changes the prepared frame's size and geometry, so
+    # annotations clicked on it would no longer fit and the variant could only fail.
+    if analysis.markers.size_mm and not (experiment.root / "annotations.json").exists():
         variants.append(Variant(
             "rectify_off" if analysis.rectify.enabled else "rectify_on",
             "perspective correction " + ("off" if analysis.rectify.enabled else "on"),

@@ -64,6 +64,70 @@ def test_demo_cli(tmp_path):
                                 "--frames", "5"])
     assert study.exit_code == 0 and "fungus study" in study.output
     assert (tmp_path / "s" / "study.yaml").exists()
+    sam = runner.invoke(app, ["demo", str(tmp_path / "c"), "--sam", "--frames", "3"])
+    assert sam.exit_code == 0 and "fungus prompt" in sam.output
+    assert Experiment(tmp_path / "c").config.analysis.target.method == "sam2"
+
+
+def test_demo_has_room_conditions_for_the_report(tmp_path):
+    from fungus_cv.analyze import covariates
+
+    run = dye_experiment(tmp_path / "demo", frames=6)
+    exp = Experiment(run.root)
+    logged = covariates.load(exp)
+    assert logged.names == ["temperature_c", "humidity_pctrh"]
+    analyze(exp)
+    result = make_report(exp, models=("sqrt_lag",), bootstrap=20,
+                         covariates=("temperature_c",))
+    assert result.covariates["temperature_c"]["coverage"] > 0.99
+    assert any(p.name.endswith("covariates.png") for p in result.files)
+
+
+def _colony_stand_in():
+    """Stands in for SAM 2 (which needs PyTorch and a download): anything on the plate that
+    isn't amber agar, i.e. the pale rim or the green centre."""
+    from fungus_cv.config import ColorTargetConfig, HsvRange
+    from fungus_cv.segment.color import ColorThresholdSegmenter
+
+    return ColorThresholdSegmenter.from_config(ColorTargetConfig(hsv_ranges=[
+        HsvRange(lower=(0, 0, 90), upper=(179, 45, 255)),
+        HsvRange(lower=(35, 0, 60), upper=(90, 255, 255))]))
+
+
+def test_sam_demo_is_set_up_for_prompting(tmp_path):
+    from fungus_cv.demo import colony_experiment
+
+    run = colony_experiment(tmp_path / "colony", frames=4)
+    exp = Experiment(run.root)
+    assert exp.config.analysis.target.method == "sam2"
+    assert exp.config.analysis.markers.size_mm == pytest.approx(15.0)
+    assert (run.root / "annotations.json").exists()
+    assert not (run.root / "prompts.json").exists()  # clicking is the user's part
+    result = CliRunner().invoke(app, ["analyze", str(run.root)])
+    assert result.exit_code == 1 and "prompt" in result.output
+
+
+def test_sam_demo_spreads_faster_one_way(tmp_path, monkeypatch):
+    from fungus_cv.analyze import pipeline
+    from fungus_cv.analyze.spread import spread
+    from fungus_cv.demo import colony_experiment
+
+    run = colony_experiment(tmp_path / "colony", frames=10, every_h=12)
+    monkeypatch.setattr(pipeline, "build_segmenter", lambda *a, **k: _colony_stand_in())
+    exp = Experiment(run.root)
+    summary = analyze(exp)
+    assert summary.processed == 10 and summary.failed == 0
+    series = make_report(exp, metric="equivalent_radius_mm", models=("linear",),
+                         bootstrap=20)
+    assert series.n_used >= 8
+    from fungus_cv.analyze.report import load_measurements
+
+    rows = sorted(load_measurements(exp), key=lambda r: r["timestamp_utc"])
+    for row, truth in zip(rows, run.radius_mm):
+        assert float(row["equivalent_radius_mm"]) == pytest.approx(truth, abs=0.6)
+    result = spread(exp)
+    assert result.fastest is not None and abs(result.fastest.angle_deg) < 50
+    assert result.anisotropy > 1.2
 
 
 @pytest.mark.parametrize("frames", [3])

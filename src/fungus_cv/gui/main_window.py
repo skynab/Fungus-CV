@@ -429,15 +429,20 @@ class MainWindow(QMainWindow):
         reveal = QAction("Show Experiment Folder", self)
         reveal.triggered.connect(self.reveal_experiment)
         demo = QAction("Make Demo Experiment…", self)
-        demo.setToolTip("A synthetic dye time-lapse to try everything without a camera.")
-        demo.triggered.connect(self.make_demo)
+        demo.setToolTip("A synthetic dye time-lapse, measured with colour thresholds (the Set "
+                        "Up Measurement workflow), to try everything without a camera.")
+        demo.triggered.connect(lambda: self.make_demo())
+        sam_demo = QAction("Make SAM 2 Demo Experiment…", self)
+        sam_demo.setToolTip("A synthetic mould colony on an agar plate, set up for the SAM "
+                            "Prompts workflow: click the colony, then Analyze.")
+        sam_demo.triggered.connect(lambda: self.make_demo(sam=True))
         archive = QAction("Archive Experiment…", self)
         archive.setToolTip("Pack settings, annotations and results into one zip with a hash "
                            "manifest, for a data repository.")
         archive.triggered.connect(self.archive_experiment)
         quit_action = QAction("Quit", self, shortcut=QKeySequence.Quit)
         quit_action.triggered.connect(self.close)
-        for action in (new_action, open_action, demo, reveal, archive):
+        for action in (new_action, open_action, demo, sam_demo, reveal, archive):
             file_menu.addAction(action)
         file_menu.addSeparator()
         file_menu.addAction(quit_action)
@@ -482,8 +487,9 @@ class MainWindow(QMainWindow):
             show_error(self, "Could not open experiment",
                        f"{path}\n\n{exc}\n\nChoose a folder containing config.yaml.")
 
-    def make_demo(self, folder: Path | None = None) -> None:
-        """Create the demo experiment in the background, then open it."""
+    def make_demo(self, folder: Path | None = None, sam: bool = False) -> None:
+        """Create a demo experiment in the background, then open it. ``sam``: the mould
+        colony for the SAM Prompts workflow instead of the dye strip."""
         from fungus_cv import demo as demo_mod
         from fungus_cv.gui.qt_util import run_task
 
@@ -492,18 +498,27 @@ class MainWindow(QMainWindow):
                 self, "Where to put the demo experiment", str(Path.home()))
             if not parent:
                 return
-            folder = Path(parent) / "fungus-demo"
+            stem = "fungus-sam-demo" if sam else "fungus-demo"
+            folder = Path(parent) / stem
             n = 2
             while folder.exists():
-                folder = Path(parent) / f"fungus-demo-{n}"
+                folder = Path(parent) / f"{stem}-{n}"
                 n += 1
+        make = demo_mod.colony_experiment if sam else demo_mod.dye_experiment
         self.statusBar().showMessage("Making the demo experiment…")
-        run_task(lambda p, s: demo_mod.dye_experiment(folder).root, self._demo_ready,
+        run_task(lambda p, s: make(folder).root, lambda root: self._demo_ready(root, sam),
                  lambda m: show_error(self, "Could not make the demo", m))
 
-    def _demo_ready(self, root) -> None:
-        self.statusBar().showMessage("Demo ready: open Analyze and press Run.", 15000)
+    def _demo_ready(self, root, sam: bool = False) -> None:
         self.open_experiment(root)
+        if sam:
+            self.go_to("SAM Prompts")
+            self.statusBar().showMessage(
+                "SAM 2 demo ready: on a frame where the colony is clearly visible, click both its "
+                "white rim and its green centre (one click takes only the centre), Save the "
+                "prompt, then open Analyze and press Run.", 30000)
+        else:
+            self.statusBar().showMessage("Demo ready: open Analyze and press Run.", 15000)
 
     def archive_experiment(self, out: Path | None = None, frames: bool | None = None) -> None:
         """Bundle the open experiment; asks where to save it and whether to include photos."""

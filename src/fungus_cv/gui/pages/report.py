@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateTimeEdit,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -34,6 +36,55 @@ METRICS = ["extent_mm", "extent_max_mm", "covered_length_pct", "coverage_pct",
            "target_area_mm2", "equivalent_radius_mm", "edge_advance_p95_mm",
            "edge_advance_max_mm", "reference_covered_pct", "gcc_p90", "gcc_mean", "exg_mean",
            "extent_px"]
+
+
+SPREAD_HINT = (
+    "<b>Nothing here yet.</b> Press <b>Spread map</b> (left) to map when each point was first "
+    "covered and how fast the edge moved in each direction.<br><br>It works on the masks of "
+    "any Analyze run, whether the target came from colour thresholds, SAM 2 or a trained "
+    "model. It says most about a patch spreading over a surface (a colony, a stain); for a "
+    "front rising along a strip, the Measurement tab already tells the story.")
+SENSITIVITY_HINT = (
+    "<b>Nothing here yet.</b> Press <b>Sensitivity check</b> (left) to re-run Analyze with each "
+    "questionable setting changed a little (thresholds, alignment, lighting, where the front "
+    "is taken) and see how far the result moves.<br><br>It works with any segmentation "
+    "method; for SAM 2 it varies the mask threshold. It is slow: one full analysis per "
+    "variant.")
+CONDITIONS_HINT = (
+    "<b>Nothing here yet.</b> Choose a logged condition under <b>Conditions</b> (left) and press "
+    "<b>Make report</b> to draw it under the measurement, with its average over the fitted "
+    "period.")
+NO_CONDITIONS_HINT = (
+    "<b>No conditions are logged for this experiment.</b> Temperature, humidity and light "
+    "change how fast things grow. Press <b>Import log…</b> next to Conditions to add a data "
+    "logger's CSV file, then choose it and press <b>Make report</b>.")
+
+
+class ResultTab(QStackedWidget):
+    """A chart, or until there is one, a note saying what fills it."""
+
+    def __init__(self, hint: str):
+        super().__init__()
+        self.hint = QLabel(hint)
+        self.hint.setWordWrap(True)
+        self.hint.setAlignment(Qt.AlignCenter)
+        self.hint.setMargin(40)
+        self.view = ImageView()
+        self.addWidget(self.hint)
+        self.addWidget(self.view)
+
+    def set_hint(self, text: str) -> None:
+        self.hint.setText(text)
+        self.view.set_image(None)
+        self.setCurrentWidget(self.hint)
+
+    def set_image(self, image) -> None:
+        self.view.set_image(image)
+        self.setCurrentWidget(self.view)
+
+    @property
+    def has_image(self) -> bool:
+        return self.currentWidget() is self.view
 
 
 class ReportPage(QWidget):
@@ -64,8 +115,12 @@ class ReportPage(QWidget):
         self.daily.setToolTip("One value per day from its frames (p90 = 90th percentile, "
                               "usual for greenness).")
         self.covariate = QComboBox()
-        self.covariate.setToolTip("Draw a logged covariate (fungus covariates import) under "
+        self.covariate.setToolTip("Draw a logged condition (temperature, humidity…) under "
                                   "the measurement and summarise it over the fitted period.")
+        self.import_btn = QPushButton("Import log…")
+        self.import_btn.setToolTip("Add a data logger's CSV file (temperature, humidity, "
+                                   "light…) to this experiment.")
+        self.import_btn.clicked.connect(self.import_conditions)
         self.include_flagged = QCheckBox("Fit flagged frames too")
         self.exclude_jumps = QCheckBox("Leave jumps out of the fits")
         self.vector = QCheckBox("Also save PDF and SVG (for papers)")
@@ -81,7 +136,10 @@ class ReportPage(QWidget):
         form.addRow("Time unit", self.time_unit)
         form.addRow("Hours of the day", self.hours)
         form.addRow("Per day", self.daily)
-        form.addRow("Conditions", self.covariate)
+        conditions = QHBoxLayout()
+        conditions.addWidget(self.covariate, 1)
+        conditions.addWidget(self.import_btn)
+        form.addRow("Conditions", conditions)
         form.addRow("", self.include_flagged)
         form.addRow("", self.exclude_jumps)
         form.addRow("", self.vector)
@@ -127,11 +185,12 @@ class ReportPage(QWidget):
         self.quality = ImageView()
         self.tabs.addTab(self.chart, "Measurement")
         self.tabs.addTab(self.quality, "Quality checks")
-        self.spread_view = ImageView()
-        self.sensitivity_view = ImageView()
+        # Filled by their own buttons (or a chosen condition), not by Make report.
+        self.spread_view = ResultTab(SPREAD_HINT)
+        self.sensitivity_view = ResultTab(SENSITIVITY_HINT)
         self.tabs.addTab(self.spread_view, "Spread")
         self.tabs.addTab(self.sensitivity_view, "Sensitivity")
-        self.covariate_view = ImageView()
+        self.covariate_view = ResultTab(CONDITIONS_HINT)
         self.tabs.addTab(self.covariate_view, "Conditions")
 
         left = QVBoxLayout()
@@ -146,7 +205,18 @@ class ReportPage(QWidget):
         layout.addWidget(left_widget)
         layout.addWidget(self.tabs, 1)
 
-        state.experiment_changed.connect(lambda _: self.refresh())
+        state.experiment_changed.connect(lambda _: self._new_experiment())
+
+    def _new_experiment(self) -> None:
+        """Charts of the previous experiment would be mistaken for this one's."""
+        self.result = None
+        self.fits.setRowCount(0)
+        self.chart.set_image(None)
+        self.quality.set_image(None)
+        self.spread_view.set_hint(SPREAD_HINT)
+        self.sensitivity_view.set_hint(SENSITIVITY_HINT)
+        self.covariate_view.set_hint(CONDITIONS_HINT)
+        self.refresh()
 
     def on_shown(self) -> None:
         self.refresh()
@@ -160,9 +230,16 @@ class ReportPage(QWidget):
         self.make_btn.setEnabled(False)
         for button in self.extra_buttons:
             button.setEnabled(False)
+        self.import_btn.setEnabled(exp is not None)
         if exp is None:
             self.message.setText("Open an experiment first.")
             return
+        from fungus_cv.analyze import covariates
+
+        logged = covariates.load(exp).names
+        self.covariate.addItems(logged)
+        if not self.covariate_view.has_image:
+            self.covariate_view.set_hint(CONDITIONS_HINT if logged else NO_CONDITIONS_HINT)
         try:
             from fungus_cv.analyze.report import list_plots, load_measurements
 
@@ -173,9 +250,6 @@ class ReportPage(QWidget):
             self.message.setText("No analysis results yet: run Analyze first.")
             return
         self.plot.addItems(plots)
-        from fungus_cv.analyze import covariates
-
-        self.covariate.addItems(covariates.load(exp).names)
         available = [m for m in METRICS if m.startswith("edge_advance")
                      or any(r.get(m, "") != "" for r in rows[:50])]
         available += [c for c in (rows[0] if rows else {})  # colour classes
@@ -261,6 +335,32 @@ class ReportPage(QWidget):
             self.message.setText(self.message.text() + f" {name}: mean {c['mean']:.3g} "
                                  f"(logged for {100 * c['coverage']:.0f}% of the period).")
         self.tabs.setCurrentIndex(0)
+
+    def import_conditions(self) -> None:
+        exp = self.state.experiment
+        if exp is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Data logger file", str(exp.root),
+                                              "Logger files (*.csv *.txt *.tsv);;All files (*)")
+        if path:
+            self.import_log(path)
+
+    def import_log(self, path) -> None:
+        from pathlib import Path
+
+        from fungus_cv.analyze import covariates
+
+        try:
+            summary = covariates.import_log(self.state.experiment, Path(path))
+        except (OSError, ValueError, KeyError) as exc:
+            self._failed(f"Could not import {Path(path).name}: {exc}")
+            return
+        chosen = self.covariate.currentText()
+        self.refresh()
+        self.covariate.setCurrentText(chosen if chosen != "(none)" else summary.columns[0])
+        self.message.setText(f"Imported {summary.rows} rows of {', '.join(summary.columns)} "
+                             f"({summary.first_utc} to {summary.last_utc} UTC). Press Make "
+                             "report to draw them.")
 
     # --- spread, sensitivity, shareable page ---------------------------------------------
 

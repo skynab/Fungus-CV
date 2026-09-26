@@ -1,12 +1,21 @@
 """Demo experiments: realistic synthetic time-lapses to try every feature without a camera.
 
-A paper towel strip dipped in blue dye, photographed from the front, with two ArUco markers
-for scale and a neutral grey card for the lighting correction. The dye rises by capillary
-wicking, h = k·√(t − t_lag), with a wet front that fades over a few millimetres, slightly
-uneven across the strip, a little camera shake, a slow drift in the room light and sensor
-noise. Because the true height of every frame is known,
-the demo also writes hand measurements (the truth plus a ruler's reading error) and a
-validation suite, so `validate`, `validate-suite`, `sensitivity`, `study` and `power` all have
+Two demos, one per way of telling the program what to measure:
+
+- ``dye_experiment`` (Set Up Measurement, colour thresholds). A paper towel strip dipped in
+  blue dye, photographed from the front, with two ArUco markers for scale and a neutral grey
+  card for the lighting correction. The dye rises by capillary wicking, h = k·√(t − t_lag),
+  with a wet front that fades over a few millimetres, slightly uneven across the strip, a
+  little camera shake, a slow drift in the room light and sensor noise.
+- ``colony_experiment`` (SAM Prompts, SAM 2). A mould colony spreading over an agar plate,
+  photographed from above every few hours for six days: a fuzzy off-white rim around an
+  older, sporulating grey-green centre, growing faster in one direction. The colony has no
+  colour of its own to threshold on, which is what SAM 2 is for; the experiment is set to
+  SAM 2 and left for you to click on.
+
+Because the truth of every frame is known, both demos also write hand measurements (the truth
+plus a ruler's reading error), a validation suite and a room-conditions log, so `validate`,
+`validate-suite`, `sensitivity`, `spread`, `covariates`, `study` and `power` all have
 something real to work on.
 """
 
@@ -132,35 +141,194 @@ def dye_experiment(root: Path, frames: int = 30, every_min: float = 2.0,
     Annotations(base=(600.0, BASE_ROW - 0.5), tip=(600.0, TOWEL_TOP - 0.5),
                 roi=[(490.0, 140.0), (710.0, 140.0), (710.0, 860.0), (490.0, 860.0)],
                 image_size=(W, H)).save(root / "annotations.json")
-    _write_truth(run)
+    _write_truth(root, run.files, run.minutes, run.heights_mm, "true_height_mm", "extent_mm")
+    _write_conditions(exp, start, minutes=frames * every_min, every_min=1.0, seed=seed)
     return run
 
 
-def _write_truth(run: DemoRun, ruler_sd_mm: float = 0.3, every: int = 3) -> None:
-    """The true heights, and hand measurements of every ``every``-th frame as a person with a
-    ruler would read them (the truth plus a reading error)."""
+def _write_truth(root: Path, files: list[str], minutes: list[float], values: list[float],
+                 column: str, metric: str, ruler_sd_mm: float = 0.3, every: int = 3) -> None:
+    """The true values, hand measurements of every ``every``-th frame as a person with a
+    ruler would read them (the truth plus a reading error), and a validation suite."""
     rng = np.random.default_rng(12345)
-    with open(run.root / "demo_truth.csv", "w", newline="", encoding="utf-8") as f:
+    with open(root / "demo_truth.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["frame", "minute", "true_height_mm"])
-        for file, minute, height in zip(run.files, run.minutes, run.heights_mm):
-            writer.writerow([Path(file).name, minute, round(height, 4)])
-    with open(run.root / "hand_measurements.csv", "w", newline="", encoding="utf-8") as f:
+        writer.writerow(["frame", "minute", column])
+        for file, minute, value in zip(files, minutes, values):
+            writer.writerow([Path(file).name, minute, round(value, 4)])
+    with open(root / "hand_measurements.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["frame", "value", "value_unc", "observer", "notes"])
-        for i, (file, height) in enumerate(zip(run.files, run.heights_mm)):
-            if i % every == 0 and height > 0:
-                reading = round((height + rng.normal(0, ruler_sd_mm)) * 2) / 2  # 0.5 mm marks
+        for i, (file, value) in enumerate(zip(files, values)):
+            if i % every == 0 and value > 0:
+                reading = round((value + rng.normal(0, ruler_sd_mm)) * 2) / 2  # 0.5 mm marks
                 writer.writerow([Path(file).name, reading, ruler_sd_mm, "demo",
                                  "truth + ruler reading error"])
-    suite = {"name": f"demo-{run.root.name}", "cases": [{
-        "name": run.root.name, "experiment": ".", "checks": [{
-            "type": "measurements", "hand": "hand_measurements.csv", "metric": "extent_mm",
+    suite = {"name": f"demo-{root.name}", "cases": [{
+        "name": root.name, "experiment": ".", "checks": [{
+            "type": "measurements", "hand": "hand_measurements.csv", "metric": metric,
             "expect": {"bias": {"abs_max": 1.0, "max_drift": 0.2},
                        "rmse": {"max": 2.0}, "within_2u": {"min": 0.7}}}]}]}
-    (run.root / "suite.yaml").write_text(
+    (root / "suite.yaml").write_text(
         "# Validation suite for the demo: `fungus validate-suite suite.yaml`\n"
         + yaml.safe_dump(suite, sort_keys=False), encoding="utf-8")
+
+
+def _write_conditions(exp: Experiment, start: datetime, minutes: float, every_min: float,
+                      seed: int, day_cycle: bool = False) -> None:
+    """A thermometer/hygrometer logging next to the camera: ``room_logger.csv`` in the
+    logger's own format, imported as `fungus covariates import` would, so the report's
+    Conditions tab has something to show."""
+    from fungus_cv.analyze import covariates
+
+    rng = np.random.default_rng(seed + 777)
+    path = exp.root / "room_logger.csv"
+    steps = int(minutes / every_min) + 2
+    drift = np.cumsum(rng.normal(0, 0.03, steps))
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Time", "Temperature (°C)", "Humidity (%RH)"])
+        for i in range(steps):
+            minute = (i - 1) * every_min  # from just before the first photo
+            cycle = math.sin(2 * math.pi * (minute / 1440 - 0.3)) if day_cycle else 0.0
+            temp = 21.5 + 1.5 * cycle + drift[i] + rng.normal(0, 0.05)
+            humidity = 48 - 4 * cycle - 2 * drift[i] + rng.normal(0, 0.3)
+            when = start + timedelta(minutes=minute)
+            writer.writerow([when.isoformat(timespec="seconds"), round(temp, 2),
+                             round(humidity, 1)])
+    covariates.import_log(exp, path)
+
+
+# --- the SAM 2 demo: a mould colony on an agar plate ----------------------------------------
+
+PLATE_CENTER = (600, 480)
+PLATE_MM = 90.0
+COLONY_MM_PER_PX = 0.125  # a closer view than the towel: the markers are 15 mm here
+INOCULUM = (PLATE_CENTER[0] - 60.0, float(PLATE_CENTER[1]))  # off centre: room to go right
+AGAR = np.array((150, 196, 218), np.float32)  # pale amber (BGR)
+TABLE = np.array((70, 72, 80), np.float32)
+MYCELIUM = np.array((232, 236, 238), np.float32)  # fuzzy off-white rim
+SPORES = np.array((118, 146, 120), np.float32)  # older, sporulating grey-green centre
+
+
+def _colony(radius_mm: float, fast_deg: float, anisotropy: float, t: float) -> np.ndarray:
+    """Soft (0..1) colony of mean radius ``radius_mm`` around the inoculum: lobed, and reaching
+    further toward ``fast_deg`` (0 = right, 90 = up) by ``anisotropy`` (fastest/slowest)."""
+    ys, xs = np.mgrid[0:H, 0:W].astype(np.float32)
+    dx, dy = xs - INOCULUM[0], INOCULUM[1] - ys  # y up
+    theta = np.arctan2(dy, dx)
+    r = np.hypot(dx, dy) * COLONY_MM_PER_PX
+    a = (anisotropy - 1) / (anisotropy + 1)
+    lobes = (0.05 * np.sin(5 * theta + 0.7) + 0.035 * np.sin(9 * theta + 2.1)
+             + 0.02 * np.sin(17 * theta + 0.3 + 0.1 * t))  # the edge keeps its shape
+    reach = radius_mm * (1 + a * np.cos(theta - math.radians(fast_deg))) * (1 + lobes)
+    return np.clip((reach - r) / 0.6 + 0.5, 0, 1)  # the hyphae fade out over ~0.6 mm
+
+
+def render_colony(radius_mm: float, rng: np.random.Generator, light: float = 1.0,
+                  shake_px: float = 1.0, fast_deg: float = 0.0, anisotropy: float = 1.4,
+                  t: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """One photo from above: the plate with a colony of mean radius ``radius_mm``. Returns the
+    photo and the colony's true mask (before the camera shake)."""
+    img = np.empty((H, W, 3), np.float32)
+    img[:] = TABLE
+    grain = cv2.resize(rng.normal(0, 7, (H // 12, W // 12)).astype(np.float32), (W, H),
+                       interpolation=cv2.INTER_CUBIC)
+    img += grain[..., None]
+    plate_px = PLATE_MM / 2 / COLONY_MM_PER_PX
+    ys, xs = np.mgrid[0:H, 0:W].astype(np.float32)
+    d = np.hypot(xs - PLATE_CENTER[0], ys - PLATE_CENTER[1])
+    inside = d < plate_px
+    shade = 1 - 0.08 * (d / plate_px) ** 2  # the agar darkens a little toward the wall
+    img[inside] = AGAR * shade[inside][:, None] + grain[inside][:, None] * 0.4
+    wall = (d >= plate_px - 6) & (d < plate_px + 4)
+    img[wall] = img[wall] * 0.7 + 255 * 0.3  # the dish wall catches the light
+    soft = _colony(radius_mm, fast_deg, anisotropy, t)
+    core = _colony(max(radius_mm - 9.0, 0.0), fast_deg, anisotropy, t) * 0.85
+    fuzz = cv2.resize(rng.normal(0, 1, (H // 3, W // 3)).astype(np.float32), (W, H),
+                      interpolation=cv2.INTER_LINEAR)
+    colony = MYCELIUM * (1 - core[..., None]) + SPORES * core[..., None]
+    colony = colony + (fuzz * 10)[..., None]  # a cottony texture
+    img = img * (1 - soft[..., None]) + colony * soft[..., None]
+    img[640:900, 60:250] = CARD
+    for marker_id, (mx, my) in {0: (80, 80), 1: (1080, 760)}.items():
+        q = 20
+        img[my - q:my + MARKER_PX + q, mx - q:mx + MARKER_PX + q] = 255
+        img[my:my + MARKER_PX, mx:mx + MARKER_PX] = _marker(marker_id)
+    img *= light
+    img += rng.normal(0, 2.0, img.shape).astype(np.float32)
+    shift = rng.normal(0, shake_px, 2)
+    matrix = np.float32([[1, 0, shift[0]], [0, 1, shift[1]]])
+    img = cv2.warpAffine(img, matrix, (W, H), borderMode=cv2.BORDER_REPLICATE)
+    return np.clip(img, 0, 255).astype(np.uint8), soft >= 0.5
+
+
+@dataclass
+class ColonyRun:
+    """The truth behind the SAM 2 demo."""
+
+    root: Path
+    speed_mm_per_h: float  # growth of the mean radius
+    lag_h: float
+    anisotropy: float  # fastest / slowest direction
+    fast_deg: float
+    hours: list[float]
+    radius_mm: list[float]  # equivalent radius, from the true area
+    area_mm2: list[float]
+    files: list[str] = field(default_factory=list)
+
+
+def colony_experiment(root: Path, frames: int = 25, every_h: float = 6.0,
+                      speed: float = 0.22, lag_h: float = 12.0, r0: float = 2.5,
+                      anisotropy: float = 1.4, fast_deg: float = 0.0, seed: int = 0,
+                      name: str | None = None, start: datetime = START) -> ColonyRun:
+    """Write the SAM 2 demo: photos, frames.csv, a config set to SAM 2, annotations (scale,
+    base, tip and the plate as the region) and truth. It has no prompts: clicking the colony
+    on the SAM Prompts page is the part of the workflow it is there to try."""
+    from fungus_cv.config import set_yaml_value
+
+    root = Path(root)
+    exp = Experiment.create(root, name or root.name)
+    text = exp.config_path.read_text(encoding="utf-8")
+    text = text.replace("size_mm: null", f"size_mm: {MARKER_PX * COLONY_MM_PER_PX}")
+    text = text.replace("interval: 30s", f"interval: {int(every_h * 3600)}s")
+    text = set_yaml_value(text, "analysis.target.method", "sam2")
+    exp.config_path.write_text(text, encoding="utf-8")
+    exp = Experiment(root)
+    rng = np.random.default_rng(seed)
+    run = ColonyRun(root=root, speed_mm_per_h=speed, lag_h=lag_h, anisotropy=anisotropy,
+                    fast_deg=fast_deg, hours=[], radius_mm=[], area_mm2=[])
+    for i in range(frames):
+        hour = i * every_h
+        radius = r0 + speed * max(hour - lag_h, 0.0)  # colonies grow at a steady speed
+        light = 1.0 - 0.04 * math.sin(2 * math.pi * hour / 24)  # daylight in the room
+        image, truth = render_colony(radius, rng, light, fast_deg=fast_deg,
+                                     anisotropy=anisotropy, t=hour / 24)
+        when = start + timedelta(hours=hour, seconds=float(rng.uniform(0, 2)))
+        data = encode_image(image, "png")
+        path = exp.save_bytes(data, when, "cam0", "png")
+        exp.append_frame(FrameRecord(
+            timestamp_utc=iso_utc(when), camera="cam0", status="ok",
+            file=exp.relative(path), sha256=sha256_bytes(data), width=W, height=H,
+            source="demo", mean_brightness=round(mean_brightness(image), 2),
+            sharpness=round(sharpness(image), 2), notes="synthetic SAM 2 demo frame"))
+        area = float(truth.sum()) * COLONY_MM_PER_PX ** 2
+        run.hours.append(hour)
+        run.area_mm2.append(area)
+        run.radius_mm.append(math.sqrt(area / math.pi))
+        run.files.append(exp.relative(path))
+    inner = PLATE_MM / 2 / COLONY_MM_PER_PX - 12  # just inside the dish wall
+    roi = [(PLATE_CENTER[0] + inner * math.cos(a), PLATE_CENTER[1] + inner * math.sin(a))
+           for a in np.linspace(0, 2 * math.pi, 32, endpoint=False)]
+    # Base = the inoculation point, tip = the dish wall in the fast direction: extent_mm is
+    # then how far the fastest edge has reached.
+    Annotations(base=INOCULUM, tip=(PLATE_CENTER[0] + inner, INOCULUM[1]), roi=roi,
+                image_size=(W, H)).save(root / "annotations.json")
+    _write_truth(root, run.files, [h * 60 for h in run.hours], run.radius_mm,
+                 "true_equivalent_radius_mm", "equivalent_radius_mm")
+    _write_conditions(exp, start, minutes=frames * every_h * 60, every_min=30.0, seed=seed,
+                      day_cycle=True)
+    return run
 
 
 def dye_study(root: Path, replicates: int = 3, frames: int = 20, every_min: float = 2.0,

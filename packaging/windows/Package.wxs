@@ -10,10 +10,10 @@
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="Fungus-CV">
-        <Files Include="!(bindpath.app)\**" />
-      </Directory>
+      <Directory Id="INSTALLFOLDER" Name="Fungus-CV" />
     </StandardDirectory>
+
+    <Files Include="!(bindpath.app)\**" />
 
     <StandardDirectory Id="ProgramMenuFolder">
       <Component Id="StartMenuShortcut" Guid="*">

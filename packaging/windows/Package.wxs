@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- WiX v4 installer for the PyInstaller output in dist/Fungus-CV.
+     Built by packaging/build_msi.py; Version and app folder are passed in on the command line. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Fungus-CV" Manufacturer="Fungus-CV" Version="$(Version)"
+           UpgradeCode="6B1D0E52-3C7A-4F58-9E0B-2A4C8D7F1E93" Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Fungus-CV is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="AppIcon" SourceFile="$(IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Fungus-CV">
+        <Files Include="!(bindpath.app)\**" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="*">
+        <Shortcut Id="AppShortcut" Name="Fungus-CV" Target="[INSTALLFOLDER]Fungus-CV.exe"
+                  WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" />
+        <RegistryValue Root="HKCU" Key="Software\Fungus-CV" Name="installed" Type="integer"
+                       Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+  </Package>
+</Wix>

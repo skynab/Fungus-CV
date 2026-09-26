@@ -39,3 +39,18 @@ the developer cannot be verified (right-click → Open works around this).
 
 Running from source is still supported: `fungus gui` opens the same window (camera permission
 then belongs to the terminal you started it from).
+
+## Automated builds and releases
+
+`.github/workflows/ci.yml` runs lint and the tests on Windows, macOS and Linux for every push
+to `dev` and every pull request.
+
+Pushing a tag such as `v0.1.0` (it must equal `fungus_cv.__version__`) runs
+`.github/workflows/release.yml`: it re-runs the tests, builds the app with `--with-models`
+(CPU-only PyTorch on Windows/Linux) on each OS and attaches the installers to a GitHub Release:
+
+| OS | Installer |
+|---|---|
+| Windows | `Fungus-CV-<version>-windows-x64.msi` (WiX v4, `packaging/windows/Package.wxs`, built by `packaging/build_msi.py`) |
+| macOS | `Fungus-CV-<version>-macos.dmg` (ad-hoc signed; see above) |
+| Linux | `Fungus-CV-<version>-linux-x64.tar.gz` |

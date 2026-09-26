@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 
 from fungus_cv.gui import theme
 from fungus_cv.gui.chart import ChartLabel
-from fungus_cv.gui.pages.report import METRICS
+from fungus_cv.gui.pages.report import METRICS, chosen_metric, fill_metrics
 from fungus_cv.gui.qt_util import preload_model_modules, run_task
 
 STATUS_COLORS = {"pass": QColor(theme.GOOD), "fail": QColor(theme.BAD),
@@ -68,8 +68,7 @@ class ValidationPage(QWidget):
         self.hand_csv = QLineEdit()
         self.hand_csv.setPlaceholderText("CSV with frame and value columns")
         self.metric = QComboBox()
-        self.metric.setEditable(True)
-        self.metric.addItems(METRICS)
+        fill_metrics(self.metric, METRICS)
         self.plot = QLineEdit()
         self.plot.setPlaceholderText("all (field experiments: one plot name)")
         self.template_count = QSpinBox()
@@ -178,7 +177,7 @@ class ValidationPage(QWidget):
         if exp is None:
             self._error("Open an analyzed experiment first.")
             return
-        hand, metric = Path(self.hand_csv.text()), self.metric.currentText()
+        hand, metric = Path(self.hand_csv.text()), chosen_metric(self.metric)
         plot = self.plot.text().strip() or None
         results_dir = self.state.results_dir()
         self.validate_btn.setEnabled(False)

@@ -19,6 +19,7 @@ from fungus_cv.capture import permissions  # noqa: E402
 from fungus_cv.capture.permissions import NOT_APPLICABLE, CameraAccess  # noqa: E402
 from fungus_cv.gui.image_view import ImageView, ViewControls  # noqa: E402
 from fungus_cv.gui.main_window import MainWindow  # noqa: E402
+from fungus_cv.gui.pages.report import select_metric  # noqa: E402
 from fungus_cv.gui.qt_util import bgr_to_qimage  # noqa: E402
 from fungus_cv.gui.state import AppState  # noqa: E402
 from fungus_cv.measure.geometry import Annotations  # noqa: E402
@@ -701,7 +702,7 @@ def test_study_page_edit_save_run_reopen(window, qtbot, tmp_path):
         for i in range(1, 4):
             study.add_experiment(tmp_path / f"{cond}{i}", condition=cond)
     assert study._cell(0, 0) == "control1"  # stored relative to the study file
-    study.metric.setCurrentText("coverage_pct")
+    select_metric(study.metric, "coverage_pct")
     study.params.setText("K, r")
     study.reference.setCurrentText("control")
     study.time_unit.setCurrentText("h")
@@ -891,6 +892,20 @@ def test_file_menu_makes_the_sam_demo_and_opens_sam_prompts(window, qtbot, tmp_p
     assert window.stack.currentWidget() is dict(window.pages)["SAM Prompts"]
 
 
+def test_demo_guide_links_to_pages_and_makes_demos(window, qtbot, monkeypatch):
+    from PySide6.QtCore import QUrl
+
+    guide = page(window, "Demo Guide")
+    assert "SAM Prompts" in guide.text.toPlainText()
+    guide._link(QUrl("page:Report"))
+    assert window.stack.currentWidget() is dict(window.pages)["Report"]
+    made = []
+    monkeypatch.setattr(window, "make_demo", lambda sam=False: made.append(sam))
+    guide.sam_btn.click()
+    guide.dye_btn.click()
+    assert made == [True, False]
+
+
 def test_report_page_imports_a_conditions_log(window, qtbot, experiment, tmp_path):
     build_experiment(experiment, minutes=range(0, 3), bump_at=-1)
     window.open_experiment(experiment.root)
@@ -998,7 +1013,7 @@ def test_report_page_hours_and_daily(window, qtbot, tmp_path):
     window.open_experiment(exp.root)
     report = page(window, "Report")
     report.refresh()
-    report.metric.setCurrentText("coverage_pct")
+    select_metric(report.metric, "coverage_pct")
     report.hours.setText("25-3")
     report.make()
     assert "hours must look like" in report.message.text()
@@ -1013,7 +1028,7 @@ def test_report_page_hours_and_daily(window, qtbot, tmp_path):
 
     warm_log(exp, 18.0, days=4)
     report.refresh()
-    report.metric.setCurrentText("coverage_pct")
+    select_metric(report.metric, "coverage_pct")
     report.covariate.setCurrentText("temperature_c")
     report.result = None
     report.make()

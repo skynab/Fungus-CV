@@ -36,6 +36,55 @@ METRICS = ["extent_mm", "extent_max_mm", "covered_length_pct", "coverage_pct",
            "target_area_mm2", "equivalent_radius_mm", "edge_advance_p95_mm",
            "edge_advance_max_mm", "reference_covered_pct", "gcc_p90", "gcc_mean", "exg_mean",
            "extent_px"]
+# What each measurement is, in words, for the Measurement dropdowns.
+METRIC_LABELS = {
+    "extent_mm": "Extent: how far the front has reached (mm)",
+    "extent_max_mm": "Furthest reach: the front's leading point (mm)",
+    "covered_length_pct": "Covered length: share of the object's length (%)",
+    "coverage_pct": "Coverage: share of the region covered (%)",
+    "target_area_mm2": "Area covered (mm²)",
+    "equivalent_radius_mm": "Equivalent radius: of a circle with the same area (mm)",
+    "edge_advance_p95_mm": "Edge advance beyond the first outline, 95th percentile (mm)",
+    "edge_advance_max_mm": "Edge advance beyond the first outline, furthest point (mm)",
+    "reference_covered_pct": "Reference covered: share of the reference object (%)",
+    "gcc_p90": "Greenness (GCC), 90th percentile",
+    "gcc_mean": "Greenness (GCC), mean",
+    "exg_mean": "Excess green (ExG), mean",
+    "extent_px": "Extent in pixels (no scale)",
+}
+
+
+def metric_label(column: str) -> str:
+    if column.startswith("class_") and column.endswith("_pct"):
+        return f"Share of the region that is {column[6:-4]} (%)"
+    return METRIC_LABELS.get(column, column)
+
+
+def fill_metrics(combo: QComboBox, columns, first: tuple[str, str] | None = None) -> None:
+    """A plain dropdown of measurements: the label in words, the column name after it (as in
+    measurements.csv and the command line), the column as the item's data. ``first`` is an
+    extra (label, data) item at the top, e.g. ("(automatic)", "")."""
+    combo.clear()
+    if first is not None:
+        combo.addItem(*first)
+    for column in columns:
+        combo.addItem(f"{metric_label(column)} · {column}", column)
+        combo.setItemData(combo.count() - 1, column, Qt.ToolTipRole)
+
+
+def chosen_metric(combo: QComboBox) -> str | None:
+    return combo.currentData() or None
+
+
+def select_metric(combo: QComboBox, column: str | None) -> None:
+    """Select ``column``, adding it if it is not listed (e.g. from a study file)."""
+    if not column:
+        return
+    index = combo.findData(column)
+    if index < 0:
+        combo.addItem(f"{metric_label(column)} · {column}", column)
+        index = combo.count() - 1
+    combo.setCurrentIndex(index)
 
 
 SPREAD_HINT = (
@@ -97,7 +146,8 @@ class ReportPage(QWidget):
         form = QFormLayout(options)
         self.plot = QComboBox()
         self.metric = QComboBox()
-        self.metric.setEditable(True)
+        self.metric.setToolTip("What to plot and fit. Only measurements this experiment's "
+                               "results have are listed.")
         self.custom_t0 = QCheckBox("Set start time (t = 0)")
         self.t0 = QDateTimeEdit(QDateTime.currentDateTime())
         self.t0.setCalendarPopup(True)
@@ -224,6 +274,7 @@ class ReportPage(QWidget):
     def refresh(self) -> None:
         exp = self.state.experiment
         self.plot.clear()
+        chosen = chosen_metric(self.metric)
         self.metric.clear()
         self.covariate.clear()
         self.covariate.addItem("(none)")
@@ -254,7 +305,9 @@ class ReportPage(QWidget):
                      or any(r.get(m, "") != "" for r in rows[:50])]
         available += [c for c in (rows[0] if rows else {})  # colour classes
                       if c.startswith("class_") and c.endswith("_pct")]
-        self.metric.addItems(available)
+        fill_metrics(self.metric, available)
+        if chosen in available:
+            select_metric(self.metric, chosen)
         self.make_btn.setEnabled(True)
         for button in self.extra_buttons:
             button.setEnabled(True)
@@ -273,7 +326,7 @@ class ReportPage(QWidget):
             return
 
         kwargs = dict(
-            metric=self.metric.currentText() or None,
+            metric=chosen_metric(self.metric),
             plot=self.plot.currentText() or None,
             t0=self.t0.dateTime().toPython().astimezone() if self.custom_t0.isChecked()
             else None,
@@ -407,7 +460,7 @@ class ReportPage(QWidget):
             return
         from fungus_cv.analyze import sensitivity
 
-        metric = self.metric.currentText() or None
+        metric = chosen_metric(self.metric)
         plot = self.plot.currentText() or None
         self._busy(True, "Re-measuring with each setting changed…")
         run_task(lambda progress, stop: sensitivity.run(
@@ -445,7 +498,7 @@ class ReportPage(QWidget):
             return
         from fungus_cv.analyze.summary import make_summary
 
-        metric = self.metric.currentText() or None
+        metric = chosen_metric(self.metric)
         results_dir = self.state.results_dir()
         self._busy(True, "Fitting every plot and writing the page…")
         run_task(lambda progress, stop: make_summary(exp, metric=metric,

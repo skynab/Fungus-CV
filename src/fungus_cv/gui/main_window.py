@@ -33,6 +33,7 @@ from fungus_cv.gui import theme
 from fungus_cv.gui.pages.analyze import AnalyzePage
 from fungus_cv.gui.pages.camera import CameraPage
 from fungus_cv.gui.pages.capture import CapturePage
+from fungus_cv.gui.pages.demo_guide import DemoGuidePage
 from fungus_cv.gui.pages.doctor import DoctorPage
 from fungus_cv.gui.pages.experiment import ExperimentPage
 from fungus_cv.gui.pages.labels import LabelsPage
@@ -63,6 +64,8 @@ PAGE_INFO = {
                     "evaluate it.",
     "Study": "Compare conditions across replicate experiments.",
     "Validation": "Agreement with hand measurements, and the validation suite.",
+    "Demo Guide": "Step by step through the two demo experiments: colour thresholds and "
+                  "SAM 2 clicks.",
     "Diagnostics": "Camera permission, cameras, display and optional dependencies on this "
                    "computer.",
 }
@@ -199,7 +202,8 @@ class MainWindow(QMainWindow):
                 ("Study", StudyPage(self.state)),
                 ("Validation", ValidationPage(self.state)),
             ]),
-            ("This computer", [
+            ("Help", [
+                ("Demo Guide", DemoGuidePage(self.state, self)),
                 ("Diagnostics", DoctorPage(self.state)),
             ]),
         ]
@@ -455,6 +459,9 @@ class MainWindow(QMainWindow):
         about.triggered.connect(lambda: QMessageBox.about(
             self, APP_NAME, f"<b>{APP_NAME}</b> {__version__}<br>Time-lapse capture and "
                             "measurement of spreading growth."))
+        guide = QAction("Demo Guide", self)
+        guide.triggered.connect(lambda: self.go_to("Demo Guide"))
+        help_menu.addAction(guide)
         help_menu.addAction(logs)
         help_menu.addAction(about)
 
@@ -516,9 +523,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "SAM 2 demo ready: on a frame where the colony is clearly visible, click both its "
                 "white rim and its green centre (one click takes only the centre), Save the "
-                "prompt, then open Analyze and press Run.", 30000)
+                "prompt, then open Analyze and press Run (Help → Demo Guide has every step).",
+                30000)
         else:
-            self.statusBar().showMessage("Demo ready: open Analyze and press Run.", 15000)
+            self.statusBar().showMessage("Demo ready: open Analyze and press Run (Help → "
+                                         "Demo Guide has every step).", 15000)
 
     def archive_experiment(self, out: Path | None = None, frames: bool | None = None) -> None:
         """Bundle the open experiment; asks where to save it and whether to include photos."""

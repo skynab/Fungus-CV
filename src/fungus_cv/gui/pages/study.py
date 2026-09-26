@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 
 from fungus_cv.gui import theme
 from fungus_cv.gui.chart import ChartLabel
-from fungus_cv.gui.pages.report import METRICS
+from fungus_cv.gui.pages.report import METRICS, chosen_metric, fill_metrics, select_metric
 from fungus_cv.gui.qt_util import run_task
 
 EXPERIMENT_COLUMNS = [("path", "Experiment folder"), ("condition", "Condition"),
@@ -82,8 +82,7 @@ class StudyPage(QWidget):
 
         self.name = QLineEdit()
         self.metric = QComboBox()
-        self.metric.setEditable(True)
-        self.metric.addItems(METRICS)
+        fill_metrics(self.metric, METRICS)
         self.model = QComboBox()
         self.also_fit = QLineEdit()
         self.also_fit.setPlaceholderText("e.g. gompertz, richards (model selection only)")
@@ -253,7 +252,7 @@ class StudyPage(QWidget):
             experiments.append(entry)
         return {
             "name": self.name.text().strip() or "study",
-            "metric": self.metric.currentText().strip() or None,
+            "metric": chosen_metric(self.metric),
             "model": self.model.currentText(),
             "also_fit": listed(self.also_fit.text()),
             "params": listed(self.params.text()) or None,
@@ -315,7 +314,7 @@ class StudyPage(QWidget):
         self.path = Path(path)
         self.path_label.setText(f"<b>{self.path.name}</b><br>{self.path}")
         self.name.setText(study.name)
-        self.metric.setCurrentText(study.metric or "")
+        select_metric(self.metric, study.metric)
         self.model.setCurrentText(study.model)
         self.also_fit.setText(", ".join(study.also_fit))
         self.params.setText(", ".join(study.params or []))

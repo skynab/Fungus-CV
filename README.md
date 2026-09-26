@@ -22,7 +22,7 @@ There are two demos, one for each way of telling the program what to measure:
 - **Dye strip** (File → Make Demo Experiment…): the **Set Up Measurement** workflow, measured with colour thresholds. A paper towel strip wicking blue dye, h = 12 mm·√(t − 0.5 min). It is built to be realistic: the wet front fades over a few millimetres and is uneven across the strip, there is camera shake, a slow change in room light, and sensor noise. It is ready to Analyze.
 - **Mould colony** (File → Make SAM 2 Demo Experiment…): the **SAM Prompts** workflow. A colony spreading over an agar plate, photographed every 6 h for six days: a fuzzy off-white rim around an older grey-green centre, growing 0.22 mm/h after a 12 h lag and 1.4× faster to the right than to the left. There is no dye colour to threshold on, so it is set to SAM 2 (install `[sam]`) and left for you to prompt: the app opens it on SAM Prompts; on a frame where the colony is clearly visible, click both its white rim and its green centre (a single click on the centre gets only the centre, 9 mm short of the edge), save the prompt, then Analyze. Report it with the `equivalent_radius_mm` or `target_area_mm2` measurement, and its **Spread map** shows the lopsided growth.
 
-Both have their truth in `demo_truth.csv`, hand measurements and a validation suite, and a room temperature and humidity log (`room_logger.csv`, already imported), so every command has something to work on.
+In the app, **Help → Demo Guide** walks through both step by step. Both have their truth in `demo_truth.csv`, hand measurements and a validation suite, and a room temperature and humidity log (`room_logger.csv`, already imported), so every command has something to work on.
 
 On the Report page, **Measurement** and **Quality checks** are drawn by **Make report**; **Spread** and **Sensitivity** by their own buttons; **Conditions** by choosing a logged condition (**Import log…** adds one) before Make report. None of them depend on how the target was segmented.
 
@@ -43,7 +43,8 @@ Fungus-CV has a desktop app with a page for each step, grouped in the sidebar:
 | | **Train Models** | train with a live loss / validation IoU chart, read the model card, use the model for the experiment, evaluate on other labeled data |
 | Results | **Study** | edit a study (replicates and conditions), run it, read condition summaries, comparisons, figures and the methods draft |
 | | **Validation** | Bland–Altman agreement with hand measurements; run the validation suite and save its baseline |
-| This computer | **Diagnostics** | camera permission, cameras, GPU, disk |
+| Help | **Demo Guide** | step-by-step walkthroughs of both demo experiments, with buttons to make them |
+| | **Diagnostics** | camera permission, cameras, GPU, disk |
 
 ```bash
 pip install -e ".[gui]"

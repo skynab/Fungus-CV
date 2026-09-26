@@ -29,7 +29,7 @@ from fungus_cv.gui import theme
 from fungus_cv.gui.chart import ChartLabel
 from fungus_cv.gui.image_view import ImageView, ViewControls
 from fungus_cv.gui.pages.experiment import _fmt_seconds
-from fungus_cv.gui.pages.report import METRICS
+from fungus_cv.gui.pages.report import METRICS, chosen_metric, fill_metrics
 from fungus_cv.gui.preview import camera_config
 from fungus_cv.gui.qt_util import preload_model_modules, run_task
 from fungus_cv.gui.theme import INK_2, SERIES
@@ -110,8 +110,7 @@ class CapturePage(QWidget):
         self.watch = QCheckBox("Measure new frames as they arrive")
         self.watch.setToolTip("Needs the measurement set up (Set Up Measurement page).")
         self.watch_metric = QComboBox()
-        self.watch_metric.setEditable(True)
-        self.watch_metric.addItems(["(automatic)"] + METRICS)
+        fill_metrics(self.watch_metric, METRICS, first=("(automatic)", ""))
         self.watch_metric.currentTextChanged.connect(lambda _: self.draw_live_chart())
         self.watch_status = QLabel()
         self.watch_status.setWordWrap(True)
@@ -417,8 +416,7 @@ class CapturePage(QWidget):
         from fungus_cv.analyze.report import _style, list_plots, load_series
 
         exp = self.state.experiment
-        chosen = self.watch_metric.currentText().strip()
-        metric = None if chosen in ("", "(automatic)") else chosen
+        metric = chosen_metric(self.watch_metric)
         if exp is None or not (self.state.results_dir() / "measurements.csv").exists():
             return
         results_dir = self.state.results_dir()

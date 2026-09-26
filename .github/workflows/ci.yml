@@ -5,6 +5,10 @@ on:
     branches: [dev, main]
   pull_request:
   workflow_call:
+    inputs:
+      skip-build:
+        type: boolean
+        default: false
 
 jobs:
   test:
@@ -37,3 +41,8 @@ jobs:
           fungus --version
           fungus init smoke-experiment
           fungus status smoke-experiment
+
+  build:
+    needs: test
+    if: ${{ !inputs.skip-build }}
+    uses: ./.github/workflows/build.yml

@@ -23,7 +23,7 @@ jobs:
             name: windows-x64
           - os: macos-latest
             name: macos
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             name: linux-x64
     runs-on: ${{ matrix.os }}
     steps:
@@ -91,7 +91,7 @@ jobs:
 
   publish:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with:

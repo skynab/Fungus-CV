@@ -12,10 +12,18 @@ class MissingDependency(RuntimeError):
 
 # Every feature that needs these says the same thing, because the fix is always the same.
 MODEL_PACKAGES = ("torch", "torchvision", "transformers")
-INSTALL_HINT = ('SAM 2 and trained models need PyTorch and transformers, which are not '
-                'installed: pip install -e ".[sam]" (with an NVIDIA GPU, install the CUDA '
-                'build of torch first -- see the README). A packaged app needs to be built '
-                'with `build_app.py --with-models`. Colour methods work without them.')
+
+
+def _install_hint() -> str:
+    """Explain the fix; a packaged app can't pip install, so it needs a different one."""
+    if getattr(sys, "frozen", False):
+        return ('SAM 2 and trained models need PyTorch and transformers, which this build '
+                "doesn't include. There's no way to add them to an installed app -- download "
+                "or build a \"with models\" installer instead (see the README/packaging docs). "
+                "Colour methods work without them.")
+    return ('SAM 2 and trained models need PyTorch and transformers, which are not '
+            'installed: pip install -e ".[sam]" (with an NVIDIA GPU, install the CUDA '
+            'build of torch first -- see the README). Colour methods work without them.')
 
 
 def import_torch():
@@ -25,7 +33,7 @@ def import_torch():
     try:
         import torch
     except ImportError as exc:
-        raise MissingDependency(INSTALL_HINT) from exc
+        raise MissingDependency(_install_hint()) from exc
     return torch
 
 
@@ -33,12 +41,12 @@ def import_transformers():
     try:
         import transformers
     except ImportError as exc:
-        raise MissingDependency(INSTALL_HINT) from exc
+        raise MissingDependency(_install_hint()) from exc
     return transformers
 
 
 def missing_dependency(exc: BaseException) -> str | None:
-    """``INSTALL_HINT`` if ``exc`` is one of these packages missing, else None.
+    """The install hint if ``exc`` is one of these packages missing, else None.
 
     Any import of them, wrapped or not, ends up in front of the user as a failed page; this
     turns "No module named 'torch'" into something they can act on.
@@ -46,7 +54,7 @@ def missing_dependency(exc: BaseException) -> str | None:
     if isinstance(exc, MissingDependency):
         return str(exc)
     if isinstance(exc, ModuleNotFoundError) and (exc.name or "").split(".")[0] in MODEL_PACKAGES:
-        return INSTALL_HINT
+        return _install_hint()
     return None
 
 

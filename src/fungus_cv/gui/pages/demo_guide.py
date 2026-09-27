@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import sys
+
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QTextBrowser, QVBoxLayout, QWidget
 
 from fungus_cv.gui import theme
+
+# A packaged app can't pip install; it needs a "with models" build instead.
+SAM_INSTALL_NOTE = (
+    'download or build a "with models" installer instead (see the packaging docs)'
+    if getattr(sys, "frozen", False) else
+    'install it with <code>pip install -e ".[sam]"</code> in the program\'s folder')
 
 # Links of the form page:<title> open that page of the app.
 GUIDE = """
@@ -41,7 +49,7 @@ the experiment folder to compare the program with a person's ruler readings. The
 no colour of its own to threshold on, so it is set to SAM 2, and telling SAM 2 what the colony
 is, is your part.</p>
 <p><b>Needs SAM 2</b> (PyTorch): if <a href="page:Diagnostics">Diagnostics</a> reports it
-missing, install it with <code>pip install -e ".[sam]"</code> in the program's folder.
+missing, {sam_note}.
 Without a graphics card it runs on the processor, just more slowly.</p>
 <ol>
 <li><b>Make it</b> with the button above (or File &rarr; Make SAM 2 Demo Experiment&hellip;).
@@ -93,7 +101,7 @@ class DemoGuidePage(QWidget):
         self.text = QTextBrowser()
         self.text.setOpenLinks(False)
         self.text.anchorClicked.connect(self._link)
-        self.text.setHtml(GUIDE)
+        self.text.setHtml(GUIDE.format(sam_note=SAM_INSTALL_NOTE))
         buttons = QHBoxLayout()
         buttons.addWidget(self.dye_btn)
         buttons.addWidget(self.sam_btn)

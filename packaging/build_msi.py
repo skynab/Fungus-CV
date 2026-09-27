@@ -1,6 +1,10 @@
-"""Build the Windows installer (.msi) from dist/Fungus-CV with the WiX v4 `wix` tool.
+"""Build the Windows installer (.msi) from dist/Fungus-CV with the WiX v5 `wix` tool.
 
-    dotnet tool install --global wix --version 4.0.5
+Pinned to v5 (not v4): the Files element used for directory harvesting in Package.wxs was
+added in WiX v5. v6+ requires an Open Source Maintenance Fee for revenue-generating users;
+v5 does not, so it stays on v5 rather than tracking latest.
+
+    dotnet tool install --global wix --version 5.0.2
     python packaging/build_app.py --with-models
     python packaging/build_msi.py
 

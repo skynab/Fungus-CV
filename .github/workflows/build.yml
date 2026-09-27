@@ -60,7 +60,7 @@ jobs:
 
       - name: Install WiX
         if: runner.os == 'Windows'
-        run: dotnet tool install --global wix --version 4.0.5
+        run: dotnet tool install --global wix --version 5.0.2
 
       - name: Package (Windows .msi)
         if: runner.os == 'Windows'

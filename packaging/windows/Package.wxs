@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- WiX v4 installer for the PyInstaller output in dist/Fungus-CV.
-     Built by packaging/build_msi.py; Version and app folder are passed in on the command line. -->
+<!-- WiX v5 installer for the PyInstaller output in dist/Fungus-CV.
+     Built by packaging/build_msi.py; Version and app folder are passed in on the command line.
+     Files (harvesting) is only valid under Package/Directory/StandardDirectory via the
+     default feature, so it's put in an explicit ComponentGroup instead - the documented,
+     unambiguous way to harvest a directory (see wixtoolset/issues#7857). -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="Fungus-CV" Manufacturer="Fungus-CV" Version="$(Version)"
            UpgradeCode="6B1D0E52-3C7A-4F58-9E0B-2A4C8D7F1E93" Scope="perMachine">
@@ -13,7 +16,9 @@
       <Directory Id="INSTALLFOLDER" Name="Fungus-CV" />
     </StandardDirectory>
 
-    <Files Include="!(bindpath.app)\**" />
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Files Include="!(bindpath.app)\**" />
+    </ComponentGroup>
 
     <StandardDirectory Id="ProgramMenuFolder">
       <Component Id="StartMenuShortcut" Guid="*">
@@ -24,5 +29,9 @@
       </Component>
     </StandardDirectory>
 
+    <Feature Id="Main" Title="Fungus-CV" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
   </Package>
 </Wix>

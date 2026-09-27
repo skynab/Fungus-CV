@@ -11,6 +11,7 @@ from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -38,6 +39,19 @@ log = logging.getLogger(__name__)
 
 PREVIEW_HINT = ("The live camera, to frame and focus before starting. Shared with "
                 "the Camera page; a capture takes the camera over.")
+
+DURATION_UNITS = [("Seconds", 1), ("Minutes", 60), ("Hours", 3600)]
+
+
+def _split_duration(seconds: float | None) -> tuple[float, int]:
+    """Seconds -> (value, DURATION_UNITS index), picking the largest whole unit."""
+    if not seconds:
+        return 0.0, 0
+    for i in (2, 1):
+        _, size = DURATION_UNITS[i]
+        if seconds >= size and seconds % size == 0:
+            return seconds / size, i
+    return seconds, 0
 
 
 class CaptureThread(QThread):
@@ -83,14 +97,21 @@ class CapturePage(QWidget):
         settings = QGroupBox("This run")
         form = QFormLayout(settings)
         self.interval = QLineEdit()
-        self.duration = QLineEdit()
-        self.duration.setPlaceholderText("empty = until stopped")
+        self.duration = QDoubleSpinBox()
+        self.duration.setRange(0, 1_000_000)
+        self.duration.setDecimals(2)
+        self.duration.setSpecialValueText("until stopped")
+        self.duration_unit = QComboBox()
+        self.duration_unit.addItems([name for name, _ in DURATION_UNITS])
+        duration_row = QHBoxLayout()
+        duration_row.addWidget(self.duration)
+        duration_row.addWidget(self.duration_unit)
         self.max_frames = QSpinBox()
         self.max_frames.setRange(0, 10_000_000)
         self.max_frames.setSpecialValueText("no limit")
         self.keep_awake = QCheckBox("Keep the computer awake")
         form.addRow("Interval", self.interval)
-        form.addRow("Duration", self.duration)
+        form.addRow("Duration", duration_row)
         form.addRow("Stop after rounds", self.max_frames)
         form.addRow("", self.keep_awake)
         form.addRow(QLabel("These override config.yaml for this run only."))
@@ -250,7 +271,9 @@ class CapturePage(QWidget):
         self.check_health()
         cap = exp.config.capture
         self.interval.setText(_fmt_seconds(cap.interval))
-        self.duration.setText(_fmt_seconds(cap.duration))
+        value, unit_index = _split_duration(cap.duration)
+        self.duration.setValue(value)
+        self.duration_unit.setCurrentIndex(unit_index)
         self.max_frames.setValue(cap.max_frames or 0)
         self.keep_awake.setChecked(cap.keep_awake)
         if self.thread is None:
@@ -265,8 +288,8 @@ class CapturePage(QWidget):
             return
         try:
             exp.config.capture.interval = parse_duration(self.interval.text().strip())
-            text = self.duration.text().strip()
-            exp.config.capture.duration = parse_duration(text) if text else None
+            seconds = self.duration.value() * DURATION_UNITS[self.duration_unit.currentIndex()][1]
+            exp.config.capture.duration = seconds if seconds > 0 else None
         except ValueError as exc:
             self.status.setText(f"<span style='color:#b00020'>{exc}</span>")
             return

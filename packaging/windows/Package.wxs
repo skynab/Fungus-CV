@@ -29,9 +29,19 @@
       </Component>
     </StandardDirectory>
 
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="*">
+        <Shortcut Id="DesktopAppShortcut" Name="Fungus-CV" Target="[INSTALLFOLDER]Fungus-CV.exe"
+                  WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" />
+        <RegistryValue Root="HKCU" Key="Software\Fungus-CV" Name="desktop_shortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
     <Feature Id="Main" Title="Fungus-CV" Level="1">
       <ComponentGroupRef Id="AppFiles" />
       <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
     </Feature>
   </Package>
 </Wix>
